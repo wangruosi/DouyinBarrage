@@ -211,17 +211,17 @@ def summarize_session(session_dir):
             'flow': flow, 'coverage': coverage, 'main_wall': mw, 'aligned': aligned}
 
 
-def cmd_summary(path):
-    # a single session dir, or a parent tree containing many
+def discover_sessions(path):
+    """A single session dir (has timing_*.csv), or every session under a parent tree."""
     if glob.glob(os.path.join(path, 'timing_*.csv')):
-        sessions = [path]
-    else:
-        sessions = sorted({os.path.dirname(f)
-                           for f in glob.glob(os.path.join(path, '**', 'timing_*.csv'),
-                                              recursive=True)})
-    if not sessions:
-        sys.exit(f"no timing_*.csv found under {path}")
+        return [path]
+    return sorted({os.path.dirname(f)
+                   for f in glob.glob(os.path.join(path, '**', 'timing_*.csv'), recursive=True)})
 
+
+def report(sessions):
+    """Print per-session detail + the fleet-wide bandwidth verdict.
+    Returns a compact stats dict (for the nightly manifest), or {} if no sidecars."""
     FLOW_MIN = 0.95   # below this = recorder fell behind real time (bandwidth starvation)
     COVER_MIN = 0.97  # below this = missing video (breaks/offline), not necessarily bandwidth
     MIN_DUR = 30      # only trust flow on segments >= this many seconds (short = noisy)
@@ -246,7 +246,7 @@ def cmd_summary(path):
 
     # ── fleet-wide bandwidth verdict ──
     if not stats:
-        print("\nno usable sidecars"); return
+        print("\nno usable sidecars"); return {}
     covers = [s['coverage'] for _, s in stats]
     # flow is only meaningful over a long-enough connected window
     ratable = [(l, s['flow']) for l, s in stats if s['main_wall'] >= MIN_DUR]
@@ -287,6 +287,23 @@ def cmd_summary(path):
         tag = "" if s['main_wall'] >= MIN_DUR else "  (short)"
         print(f"    {s['flow']:.3f}  cover {s['coverage']:.2f}  {_fmt_dur(s['main_wall']):>6}  {l.split('/')[0]}{tag}")
     print("=" * 64)
+
+    return {
+        'rooms': len(stats), 'no_data': len(nodata), 'short': short,
+        'flow_mean': round(mean(flows), 4) if flows else None,
+        'flow_min': round(min(flows), 4) if flows else None,
+        'cover_mean': round(mean(covers), 4), 'cover_min': round(min(covers), 4),
+        'bandwidth_limited': len(bw) >= 2,
+        'suspects': [{'room': l.split('/')[0], 'flow': round(f, 3)} for l, f in bw],
+        'verdict': verdict,
+    }
+
+
+def cmd_summary(path):
+    sessions = discover_sessions(path)
+    if not sessions:
+        sys.exit(f"no timing_*.csv found under {path}")
+    report(sessions)
 
 
 if __name__ == '__main__':

@@ -80,6 +80,22 @@ print(f"[align] aligned {n} sessions")
 PY
 ) || log "WARN alignment step had issues (non-fatal)"
 
+# ---------- A3. bandwidth verdict (flow/coverage from the timing sidecars) ----------
+# MUST run before the purge (D removes the timing files). Prints the fleet verdict into the
+# log and captures a compact summary for the manifest (the morning brief).
+log "bandwidth verdict ..."
+BW_JSON="$(mktemp)"
+( cd "$APP_DIR" && python3 - "$DATA_DIR" "$DATE" "$BW_JSON" <<'PY'
+import sys, glob, os, json
+sys.path.insert(0, os.getcwd())
+import align
+data, date, out = sys.argv[1], sys.argv[2], sys.argv[3]
+sessions = sorted(glob.glob(f"{data}/*/{date}_*"))
+stats = align.report(sessions) or {}          # prints per-room detail + fleet verdict
+json.dump(stats, open(out, "w", encoding="utf-8"), ensure_ascii=False)
+PY
+) || log "WARN bandwidth verdict step had issues (non-fatal)"
+
 # ---------- B. pack tonight's sessions into shards + text bundle + manifest ----------
 log "pack (station=$STATION date=$DATE after=$AFTER) ..."
 if ! python3 "$HERE/pack.py" --station "$STATION" --date "$DATE" --after "$AFTER" \
@@ -107,13 +123,19 @@ log "upload=$UPLOAD"
 
 # ---------- record idle+upload into the manifest (also the morning brief) ----------
 MANIFEST="$REPO/manifest/$DATE/$STATION.json"
-python3 - "$MANIFEST" "$IDLE" "$UPLOAD" <<'PY' || true
-import json, sys
-path, idle, up = sys.argv[1], sys.argv[2], sys.argv[3]
+python3 - "$MANIFEST" "$IDLE" "$UPLOAD" "$BW_JSON" <<'PY' || true
+import json, sys, os
+path, idle, up, bw = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
 m = json.load(open(path, encoding="utf-8"))
 m["idle"] = (idle == "true"); m["upload"] = up
+try:
+    if bw and os.path.exists(bw):
+        m["bandwidth"] = json.load(open(bw, encoding="utf-8"))   # fleet verdict -> morning brief
+except Exception:
+    pass
 json.dump(m, open(path, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
 PY
+rm -f "$BW_JSON" 2>/dev/null || true
 # archive the finalized manifest locally too (tiny, plain json — the morning brief)
 mkdir -p "$ARCHIVE/manifest/$DATE"
 cp -f "$MANIFEST" "$ARCHIVE/manifest/$DATE/$STATION.json" 2>/dev/null || true
