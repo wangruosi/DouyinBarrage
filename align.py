@@ -190,6 +190,12 @@ def summarize_session(session_dir):
 
     video = sum(s[5] - s[4] for s in seg)   # summed per-segment content duration
     wall = rows[-1][0] - start
+    coverage = video / wall if wall > 0 else 1.0   # fraction of wall time that has video
+    # flow = real-time keep-up on the longest (main) segment while connected:
+    #   ~1.0 = recorder tracked real time; <1.0 = fell behind => bandwidth starvation
+    main = max(seg, key=lambda s: s[5] - s[4])
+    mw = main[3] - main[1]
+    flow = (main[5] - main[4]) / mw if mw > 0 else 1.0
 
     aligned = {}
     for f in sorted(glob.glob(os.path.join(session_dir, '*_aligned.csv'))):
@@ -201,7 +207,8 @@ def summarize_session(session_dir):
             if v == 'True': gap += 1
             elif v == 'outside': out += 1
         aligned[kind] = (tot, gap, out)
-    return {'segs': seg, 'breaks': breaks, 'video': video, 'wall': wall, 'aligned': aligned}
+    return {'segs': seg, 'breaks': breaks, 'video': video, 'wall': wall,
+            'flow': flow, 'coverage': coverage, 'main_wall': mw, 'aligned': aligned}
 
 
 def cmd_summary(path):
@@ -214,13 +221,20 @@ def cmd_summary(path):
                                               recursive=True)})
     if not sessions:
         sys.exit(f"no timing_*.csv found under {path}")
+
+    FLOW_MIN = 0.95   # below this = recorder fell behind real time (bandwidth starvation)
+    COVER_MIN = 0.97  # below this = missing video (breaks/offline), not necessarily bandwidth
+    MIN_DUR = 30      # only trust flow on segments >= this many seconds (short = noisy)
+    stats, nodata = [], []
     for sd in sessions:
+        label = os.path.join(os.path.basename(os.path.dirname(sd)), os.path.basename(sd))
         s = summarize_session(sd)
         if not s:
-            continue
-        label = os.path.join(os.path.basename(os.path.dirname(sd)), os.path.basename(sd))
+            nodata.append(label); continue
+        stats.append((label, s))
         print(f"\n{label}")
-        print(f"  segments: {len(s['segs'])}   video {_fmt_dur(s['video'])} / wall {_fmt_dur(s['wall'])}")
+        print(f"  segments: {len(s['segs'])}   video {_fmt_dur(s['video'])} / wall {_fmt_dur(s['wall'])}"
+              f"   flow {s['flow']:.2f}  cover {s['coverage']:.2f}")
         if s['breaks']:
             for dur, iso, off, kind in sorted(s['breaks'], key=lambda b: -b[0]):
                 print(f"  break: {dur:.1f}s @ {_fmt_dur(off)} in ({iso}, {kind})")
@@ -229,6 +243,45 @@ def cmd_summary(path):
         if s['aligned']:
             parts = [f"{k} {t}(gap{g},out{o})" for k, (t, g, o) in s['aligned'].items()]
             print("  aligned: " + "  ".join(parts))
+
+    # ── fleet-wide bandwidth verdict ──
+    if not stats:
+        print("\nno usable sidecars"); return
+    covers = [s['coverage'] for _, s in stats]
+    # flow is only meaningful over a long-enough connected window
+    ratable = [(l, s['flow']) for l, s in stats if s['main_wall'] >= MIN_DUR]
+    short = len(stats) - len(ratable)
+    flows = [f for _, f in ratable]
+    bw = sorted([(l, f) for l, f in ratable if f < FLOW_MIN], key=lambda x: x[1])   # bandwidth suspects
+    brk = sorted([(l, s['coverage']) for l, s in stats
+                  if s['coverage'] < COVER_MIN and s['flow'] >= FLOW_MIN], key=lambda x: x[1])
+    mean = lambda xs: sum(xs) / len(xs) if xs else 1.0
+    print("\n" + "=" * 64)
+    print(f"FLEET SUMMARY — {len(stats)} rooms" + (f" (+{len(nodata)} no-data)" if nodata else ""))
+    if flows:
+        print(f"  flow  (real-time keep-up, {len(flows)} rooms ≥{MIN_DUR}s): mean {mean(flows):.3f}  min {min(flows):.3f}")
+    print(f"  cover (video / wall):      mean {mean(covers):.3f}  min {min(covers):.3f}")
+    # bandwidth is a SHARED constraint: real starvation hits several rooms at once.
+    if len(bw) >= 2:
+        print(f"  ⚠ BANDWIDTH-LIMITED — {len(bw)} rooms below real time (flow<{FLOW_MIN}): "
+              + ", ".join(f"{l.split('/')[0]} {f:.2f}" for l, f in bw))
+        verdict = "BANDWIDTH is the constraint — multiple rooms fell behind real time."
+    elif len(bw) == 1:
+        print(f"  1 isolated room below real time: {bw[0][0].split('/')[0]} {bw[0][1]:.2f} "
+              f"(room-specific, not shared bandwidth)")
+        verdict = "bandwidth OK; one isolated room dip (stream-side, not the shared pipe)."
+    else:
+        print(f"  ✓ no bandwidth starvation — recorder tracked real time on every rated room (flow≥{FLOW_MIN})")
+        verdict = "bandwidth OK; any missing video is reconnects/offline, not bandwidth."
+    if brk:
+        print("  breaks/offline (low cover, flow ok): "
+              + ", ".join(f"{l.split('/')[0]} {c:.2f}" for l, c in brk[:8]))
+    if nodata:
+        print("  no-data (barely started / offline): " + ", ".join(l.split('/')[0] for l in nodata[:8]))
+    if short:
+        print(f"  ({short} rooms too short (<{MIN_DUR}s) to rate flow)")
+    print("  verdict: " + verdict)
+    print("=" * 64)
 
 
 if __name__ == '__main__':
