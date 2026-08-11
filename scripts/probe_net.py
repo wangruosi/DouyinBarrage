@@ -3,7 +3,8 @@
 """Probe: resolve a live room, list all quality stream URLs, and A/B benchmark
 FLV pull throughput DIRECT (no proxy) vs via PROXY. Prints a decision."""
 import os, sys, time, json
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# repo root = parent of scripts/ (so `service` and `base` packages import when run as scripts/probe_net.py)
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import requests
 from service.network import fetch_ttwid, enter_room_api, resolve_live_id, build_http_headers
 from base.utils import USER_AGENTS, WEBCAST_SDK_VERSION, extract_ua_version
