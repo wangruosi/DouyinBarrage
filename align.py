@@ -281,6 +281,11 @@ def cmd_summary(path):
     if short:
         print(f"  ({short} rooms too short (<{MIN_DUR}s) to rate flow)")
     print("  verdict: " + verdict)
+    # per-room flow, descending (short recordings marked — flow is noisy under MIN_DUR)
+    print(f"\n  flow per room (desc):")
+    for l, s in sorted(stats, key=lambda ls: -ls[1]['flow']):
+        tag = "" if s['main_wall'] >= MIN_DUR else "  (short)"
+        print(f"    {s['flow']:.3f}  cover {s['coverage']:.2f}  {_fmt_dur(s['main_wall']):>6}  {l.split('/')[0]}{tag}")
     print("=" * 64)
 
 
