@@ -55,8 +55,9 @@ say() { echo "[run $(date '+%T')] $*"; }
 
 # ---------------- pre-flight (fold in the recording smoke checks) ----------------
 pass=0; fail=0
-ok()  { echo "  [PASS] $*"; pass=$((pass+1)); }
-bad() { echo "  [FAIL] $*"; fail=$((fail+1)); }
+ok()   { echo "  [PASS] $*"; pass=$((pass+1)); }
+bad()  { echo "  [FAIL] $*"; fail=$((fail+1)); }
+warn() { echo "  [WARN] $*"; }
 echo "================= test run ($(hostname), $(date '+%F %T')) ================="
 echo "stages: ${!WANT[*]}   minutes: $MINUTES   room: ${ROOM:-<all>}   upload: NO  purge: NO"
 echo "--- pre-flight ---"
@@ -82,6 +83,19 @@ command -v ffmpeg >/dev/null && ok "ffmpeg present" || bad "ffmpeg NOT found"
 if [ -n "$ROOM" ]; then ok "single room: $ROOM"
 elif [ -s rooms.txt ]; then ok "rooms.txt: $(grep -vc '^#' rooms.txt) rooms"
 else bad "rooms.txt missing/empty"; fi
+# cookie: Douyin now throttles guest ttwid fetches — a cookie (with ttwid) is effectively
+# required for multi-room runs; without it most rooms fail with '无法获取 ttwid'.
+NROOMS=$( [ -n "$ROOM" ] && echo 1 || grep -vc '^#' rooms.txt 2>/dev/null || echo 0 )
+if [ -f cookie.txt ] && grep -q 'ttwid=' cookie.txt; then
+  ok "cookie.txt present (ttwid found — authenticated; avoids guest ttwid throttling)"
+elif [ -f cookie.txt ]; then
+  bad "cookie.txt exists but has no 'ttwid=' — re-copy the FULL browser cookie string from douyin.com"
+elif [ "${NROOMS:-0}" -gt 3 ]; then
+  warn "no cookie.txt (guest mode) + ${NROOMS} rooms — Douyin throttles guest ttwid fetches;"
+  warn "  expect most rooms to fail '无法获取 ttwid'. Add cookie.txt (PROTOCOL §2.4) before a real run."
+else
+  ok "no cookie.txt (guest mode — OK for a small test)"
+fi
 if [ "$fail" -gt 0 ]; then echo "--- PRE-FLIGHT FAILED ($fail) — fix [FAIL] items ---"; exit 1; fi
 echo "  pre-flight OK ($pass checks)"
 [ "$CHECK_ONLY" -eq 1 ] && { echo "--- --check-only: done ---"; exit 0; }
