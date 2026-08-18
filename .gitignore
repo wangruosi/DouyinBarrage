@@ -43,3 +43,4 @@ rooms.all.txt
 
 # fleet: local text/manifest archive (runtime, not source)
 archive/
+.venv-asr

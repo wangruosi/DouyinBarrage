@@ -1,147 +1,159 @@
 #!/usr/bin/env bash
-# fleet/run.sh — composable pipeline driver.
+# fleet/run.sh — composable, flexible test driver (v2).
 #
-# PHASE 1: TEST SUBSETS ONLY. Runs a short, safe session for operators on a station with no
-# Claude — it records briefly, checks real-time keep-up (bandwidth verdict), and optionally
-# transcribes. It NEVER uploads to ModelScope and NEVER purges. Reuses scripts/record.sh +
-# align.py; the full nightly pipeline stays in nightly.sh / postrun.sh (untouched).
+# For operators on a station with no Claude: record a subset briefly, check real-time keep-up,
+# optionally transcribe, and optionally upload to a (test) ModelScope dataset. Safe by default:
+# it KEEPS recordings (use --purge to delete after a verified upload). The full nightly pipeline
+# is fleet/nightly.sh; this driver reuses scripts/record.sh + fleet/pack.py + fleet/ms_upload.py.
 #
 # Usage:
-#   fleet/run.sh --test                         # record(3m) + check          (= steps 2,3)
-#   fleet/run.sh --test --stages 2,3,4          # + transcribe                (= steps 2,3,4)
-#   fleet/run.sh --test --stages record,check   # names work too
-#   fleet/run.sh --test --minutes 5 --room 56697889278   # single room, 5 min
-#   fleet/run.sh --test --keep                  # keep the test recordings (default: delete)
-#   fleet/run.sh --test --yes                   # no prompts (run straight through)
-#   fleet/run.sh --test --check-only            # pre-flight checks only, do NOT record
+#   fleet/run.sh --rooms 5                        # record 5 rooms(3m) + check       (no upload)
+#   fleet/run.sh --rooms 5 --upload               # + pack & upload to douyin-test
+#   fleet/run.sh --room <id> --minutes 5 --upload # single room, 5 min, upload
+#   fleet/run.sh --stages 2,3,5 --rooms 3         # explicit stages (5=upload)
+#   fleet/run.sh --upload --purge                 # delete local recordings after a verified upload
+#   fleet/run.sh --repo-id SISU_DynCogLab/douyin  # upload to a different dataset
+#   fleet/run.sh --check-only                     # pre-flight checks only
 #
-# stages:  2=record  3=check(real-time keep-up)  4=transcribe   (record is always included)
-# Exit:    0 = ok | 1 = problem (preflight fail / bandwidth-limited) | 2 = inconclusive (no rooms live)
+# stages: 2=record  3=check  4=transcribe(stub)  5=upload      (record always included)
+# Exit:   0 ok | 1 problem (preflight/bandwidth/upload) | 2 inconclusive (no rooms live)
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(dirname "$HERE")"
 cd "$REPO"
 
-MODE=""; STAGES="record,check"; MINUTES=3; ROOM=""; KEEP=0; YES=0; CHECK_ONLY=0
+STAGES="record,check"; MINUTES=3; ROOM=""; ROOMS_N=""; DO_UPLOAD=0; PURGE=0; YES=0; CHECK_ONLY=0
+REPO_ID="${REPO_ID:-SISU_DynCogLab/douyin-test}"; STATION="${STATION:-runtest}"
+TOKEN_FROM="${MS_TOKEN_FROM:-}"; [ -z "$TOKEN_FROM" ] && [ -d "$REPO/../douyin/.git" ] && TOKEN_FROM="$REPO/../douyin"
 while [ $# -gt 0 ]; do case "$1" in
-  --test)       MODE=test; shift;;
+  --test)       shift;;                 # accepted for back-compat (no longer required)
   --stages)     STAGES="$2"; shift 2;;
   --minutes)    MINUTES="$2"; shift 2;;
+  --rooms)      ROOMS_N="$2"; shift 2;;
   --room)       ROOM="$2"; shift 2;;
-  --keep)       KEEP=1; shift;;
+  --upload)     DO_UPLOAD=1; shift;;
+  --repo-id)    REPO_ID="$2"; shift 2;;
+  --station)    STATION="$2"; shift 2;;
+  --token-from) TOKEN_FROM="$2"; shift 2;;
+  --purge)      PURGE=1; shift;;
+  --keep)       PURGE=0; shift;;        # keep is the default; accepted for clarity
   --yes)        YES=1; shift;;
   --check-only) CHECK_ONLY=1; shift;;
   -h|--help)    sed -n '2,20p' "$0"; exit 0;;
   *) echo "unknown arg: $1  (see: fleet/run.sh --help)"; exit 2;;
 esac; done
-[ "$MODE" = test ] || { echo "Phase 1 supports --test only (full pipeline: fleet/nightly.sh)."; exit 2; }
 
-# --- resolve requested stages (numeric aliases -> names; record always on) ---
 declare -A WANT=()
-_name() { case "$1" in 2) echo record;; 3) echo check;; 4) echo transcribe;;
-                       record|check|transcribe) echo "$1";; *) echo "BAD:$1";; esac; }
+_name() { case "$1" in 2) echo record;; 3) echo check;; 4) echo transcribe;; 5) echo upload;;
+                       record|check|transcribe|upload) echo "$1";; *) echo "BAD:$1";; esac; }
 for s in ${STAGES//,/ }; do
   n="$(_name "$s")"; [ "${n#BAD:}" != "$n" ] && { echo "unknown stage: ${n#BAD:}"; exit 2; }
   WANT[$n]=1
 done
-WANT[record]=1   # test always records fresh (check/transcribe consume its output)
+WANT[record]=1
+[ "$DO_UPLOAD" -eq 1 ] && WANT[upload]=1
 
-ask() {  # ask "prompt"  -> 0=yes. Auto-yes with --yes or when stdin is not a TTY (cron/pipe).
-  [ "$YES" -eq 1 ] && return 0
-  [ -t 0 ] || return 0
-  local a; read -r -p "  >> $1 [y/N] " a; [[ "$a" =~ ^[Yy] ]]
-}
 say() { echo "[run $(date '+%T')] $*"; }
+find_ms_py() { for p in .venv-asr/bin/python ../DouyinBarrage/.venv-asr/bin/python python3; do
+  "$p" -c "import modelscope" >/dev/null 2>&1 && { echo "$p"; return; }; done; }
 
-# ---------------- pre-flight (fold in the recording smoke checks) ----------------
+# ---------------- pre-flight ----------------
 pass=0; fail=0
 ok()   { echo "  [PASS] $*"; pass=$((pass+1)); }
 bad()  { echo "  [FAIL] $*"; fail=$((fail+1)); }
 warn() { echo "  [WARN] $*"; }
-echo "================= test run ($(hostname), $(date '+%F %T')) ================="
-echo "stages: ${!WANT[*]}   minutes: $MINUTES   room: ${ROOM:-<all>}   upload: NO  purge: NO"
+echo "================= run ($(hostname), $(date '+%F %T')) ================="
+echo "stages: ${!WANT[*]}   minutes: $MINUTES   rooms: ${ROOM:-${ROOMS_N:-all}}   upload: $([ -n "${WANT[upload]:-}" ] && echo "$REPO_ID" || echo NO)   purge: $([ "$PURGE" -eq 1 ] && echo YES || echo NO)"
 echo "--- pre-flight ---"
-PY=""; [ -x .venv/bin/python ] && PY=".venv/bin/python"
-[ -z "$PY" ] && command -v python3 >/dev/null && PY="python3"
-if [ -z "$PY" ]; then bad "python not found (create .venv; pip install -r requirements.txt)"; else
+PY=""; [ -x .venv/bin/python ] && PY=".venv/bin/python"; [ -z "$PY" ] && command -v python3 >/dev/null && PY="python3"
+if [ -z "$PY" ]; then bad "python not found"; else
   MISS="$("$PY" - <<'P'
-import importlib.util as u
-print(",".join(m for m in ["requests","websocket","yaml","google.protobuf"] if u.find_spec(m) is None))
+import importlib
+miss=[]
+for m in ["requests","websocket","yaml","google.protobuf"]:
+    try: importlib.import_module(m)
+    except Exception: miss.append(m)
+print(",".join(miss))
 P
 )"; [ -z "$MISS" ] && ok "python + deps ($("$PY" --version 2>&1))" || bad "missing deps: $MISS"
 fi
 command -v node >/dev/null || for d in "$HOME/.nvm/versions/node"/*/bin "$HOME/.local/bin"; do
   [ -x "$d/node" ] && { export PATH="$d:$PATH"; break; }; done
-if command -v node >/dev/null; then
-  NV="$(node --version | tr -d v | cut -d. -f1)"
-  { [ "${NV:-0}" -ge 16 ] 2>/dev/null && ok "node $(node --version) (signing OK)"; } || bad "node too old ($(node --version)); need >=16"
-else bad "node NOT found — request signing fails (DEVICE_BLOCKED). Install Node >=20."; fi
+command -v node >/dev/null && ok "node $(node --version)" || bad "node NOT found (signing → DEVICE_BLOCKED)"
 command -v ffmpeg >/dev/null || for d in "$HOME/.local/bin" "$HOME/fsl/bin"; do
   [ -x "$d/ffmpeg" ] && { export PATH="$d:$PATH"; break; }; done
 command -v ffmpeg >/dev/null && ok "ffmpeg present" || bad "ffmpeg NOT found"
-[ -f config.yaml ] && ok "config.yaml ($(grep -oE '标清|原画|蓝光|超清|高清' config.yaml | head -1) quality)" || bad "config.yaml missing"
+[ -f config.yaml ] && ok "config.yaml ($(grep -oE '标清|原画|蓝光|超清|高清' config.yaml | head -1))" || bad "config.yaml missing"
 if [ -n "$ROOM" ]; then ok "single room: $ROOM"
-elif [ -s rooms.txt ]; then ok "rooms.txt: $(grep -vc '^#' rooms.txt) rooms"
+elif [ -s rooms.txt ]; then ok "rooms.txt: $(grep -vc '^#' rooms.txt) rooms$([ -n "$ROOMS_N" ] && echo " (using first $ROOMS_N)")"
 else bad "rooms.txt missing/empty"; fi
-# cookie: Douyin now throttles guest ttwid fetches — a cookie (with ttwid) is effectively
-# required for multi-room runs; without it most rooms fail with '无法获取 ttwid'.
-NROOMS=$( [ -n "$ROOM" ] && echo 1 || grep -vc '^#' rooms.txt 2>/dev/null || echo 0 )
-if [ -f cookie.txt ] && grep -q 'ttwid=' cookie.txt; then
-  ok "cookie.txt present (ttwid found — authenticated; avoids guest ttwid throttling)"
-elif [ -f cookie.txt ]; then
-  bad "cookie.txt exists but has no 'ttwid=' — re-copy the FULL browser cookie string from douyin.com"
-elif [ "${NROOMS:-0}" -gt 3 ]; then
-  warn "no cookie.txt (guest mode) + ${NROOMS} rooms — Douyin throttles guest ttwid fetches;"
-  warn "  expect most rooms to fail '无法获取 ttwid'. Add cookie.txt (PROTOCOL §2.4) before a real run."
-else
-  ok "no cookie.txt (guest mode — OK for a small test)"
+NROOMS=$( [ -n "$ROOM" ] && echo 1 || echo "${ROOMS_N:-$(grep -vc '^#' rooms.txt 2>/dev/null || echo 0)}" )
+if [ -f cookie.txt ] && grep -q 'sessionid=' cookie.txt; then ok "cookie.txt (sessionid — authenticated)"
+elif [ "${NROOMS:-0}" -gt 3 ]; then warn "no logged-in cookie + ${NROOMS} rooms — Douyin throttles guest ttwid; many may fail"
+else ok "no logged-in cookie (guest — OK for a small test)"; fi
+if [ -n "${WANT[upload]:-}" ]; then
+  MS_PY="$(find_ms_py)"; [ -n "$MS_PY" ] && ok "modelscope SDK ($MS_PY)" || bad "no python with modelscope (pip install modelscope)"
+  { [ -n "$TOKEN_FROM" ] || [ -n "${MODELSCOPE_API_TOKEN:-}" ]; } && ok "ModelScope token available" || bad "no token (--token-from / MODELSCOPE_API_TOKEN)"
 fi
-if [ "$fail" -gt 0 ]; then echo "--- PRE-FLIGHT FAILED ($fail) — fix [FAIL] items ---"; exit 1; fi
+[ "$fail" -gt 0 ] && { echo "--- PRE-FLIGHT FAILED ($fail) ---"; exit 1; }
 echo "  pre-flight OK ($pass checks)"
 [ "$CHECK_ONLY" -eq 1 ] && { echo "--- --check-only: done ---"; exit 0; }
 
-# ---------------- stage: record (step 2) ----------------
-say "STAGE record — ${MINUTES}m (exercises signing + WebSocket + ffmpeg; NO upload)"
+# ---------------- optional: limit to first N rooms (restore rooms.txt on exit) ----------------
+if [ -n "$ROOMS_N" ] && [ -z "$ROOM" ]; then
+  cp rooms.txt "/tmp/rooms.bak.$$"
+  trap 'mv -f "/tmp/rooms.bak.$$" rooms.txt 2>/dev/null || true' EXIT
+  grep -vE '^\s*#|^\s*$' "/tmp/rooms.bak.$$" | head -n "$ROOMS_N" > rooms.txt
+  say "limited to first $ROOMS_N room(s)"
+fi
+
+# ---------------- stage: record ----------------
+DATE=$(date +%Y%m%d)
+say "STAGE record — ${MINUTES}m"
 STAMP=$(date +%s)
 RARGS=(--minutes "$MINUTES" --log-level INFO); [ -n "$ROOM" ] && RARGS+=(--room "$ROOM")
 bash scripts/record.sh "${RARGS[@]}" || true
-mapfile -t SESS < <(find data -mindepth 2 -maxdepth 2 -type d -newermt "@$STAMP" -name '2*' 2>/dev/null | sort)
+# v2 layout: sessions are data/{DATE}/{anchor} (depth 2), created during this run
+mapfile -t SESS < <(find "data/$DATE" -mindepth 1 -maxdepth 1 -type d -newermt "@$STAMP" 2>/dev/null | sort)
 say "recorded ${#SESS[@]} session(s)"
-if [ "${#SESS[@]}" -eq 0 ]; then
-  echo "INCONCLUSIVE — no rooms recorded (none live now?). Re-run during broadcast hours."; exit 2
-fi
+[ "${#SESS[@]}" -eq 0 ] && { echo "INCONCLUSIVE — no rooms recorded (none live / all throttled?)."; exit 2; }
 
 RC=0
-# ---------------- stage: check (step 3 — real-time keep-up / bandwidth verdict) ----------------
+# ---------------- stage: check ----------------
 if [ -n "${WANT[check]:-}" ]; then
   say "STAGE check — real-time keep-up / bandwidth verdict"
   "$PY" - "${SESS[@]}" <<'PY' || RC=$?
 import sys, align
-stats = align.report(sys.argv[1:])            # prints per-room detail + fleet verdict
-sys.exit(1 if stats.get("bandwidth_limited") else 0)
+sys.exit(1 if (align.report(sys.argv[1:]) or {}).get("bandwidth_limited") else 0)
 PY
-  [ "$RC" -ne 0 ] && say "⚠ bandwidth-limited — see flagged rooms above"
+  [ "$RC" -ne 0 ] && say "⚠ bandwidth-limited"
 fi
 
-# ---------------- stage: transcribe (step 4 — PHASE 2 STUB) ----------------
+# ---------------- stage: transcribe (Phase 2 stub) ----------------
 if [ -n "${WANT[transcribe]:-}" ]; then
-  if ask "proceed to transcribe ${#SESS[@]} session(s)?"; then
-    say "STAGE transcribe — (Phase 2: not yet implemented)"
-    echo "  Will: convert .ts->.mp4 -> ASR per room (.venv-asr) -> map video-time to wall-clock via"
-    echo "  the timing sidecar (align.video_to_wall) -> write transcript.csv on the chat timeline."
-  else
-    say "skipped transcribe"
-  fi
+  say "STAGE transcribe — (Phase 2: not yet implemented)"
 fi
 
-# ---------------- cleanup (test recordings are disposable) ----------------
-if [ "$KEEP" -eq 0 ] && ask "delete the ${#SESS[@]} test recording(s)?"; then
-  for d in "${SESS[@]}"; do rm -rf "$d"; done
-  say "removed ${#SESS[@]} test session(s) (use --keep to retain)"
+# ---------------- stage: upload (pack + SDK upload to a test dataset) ----------------
+if [ -n "${WANT[upload]:-}" ]; then
+  say "STAGE upload — pack + SDK upload -> $REPO_ID (station=$STATION)"
+  MS_PY="${MS_PY:-$(find_ms_py)}"; STAGING="/tmp/run_staging.$$"; rm -rf "$STAGING"
+  if python3 fleet/pack.py --station "$STATION" --date "$DATE" --data-dir data --out-dir "$STAGING" --shard-gb 7; then
+    if "$MS_PY" fleet/ms_upload.py --repo-id "$REPO_ID" --staging "$STAGING" --station "$STATION" \
+         --date "$DATE" ${TOKEN_FROM:+--token-from "$TOKEN_FROM"}; then
+      say "✓ upload VERIFIED -> $REPO_ID"
+    else say "✗ upload FAILED"; RC=1; PURGE=0; fi
+  else say "✗ pack FAILED"; RC=1; PURGE=0; fi
+  rm -rf "$STAGING"
+fi
+
+# ---------------- retention (KEEP by default; --purge deletes after a verified upload) ----------------
+if [ "$PURGE" -eq 1 ]; then
+  rm -rf "data/$DATE"; say "purged data/$DATE (--purge)"
 else
-  say "kept ${#SESS[@]} session(s) under data/"
+  say "kept ${#SESS[@]} session(s) under data/$DATE"
 fi
 
 echo "================= result ================="
-[ "$RC" -eq 0 ] && echo "TEST OK — recording works, real-time keep-up good." || echo "TEST: bandwidth-limited (see check)."
+[ "$RC" -eq 0 ] && echo "OK" || echo "PROBLEM (see above)"
 exit "$RC"
