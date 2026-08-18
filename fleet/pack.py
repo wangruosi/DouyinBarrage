@@ -2,18 +2,20 @@
 """
 fleet/pack.py — package one station-night into ModelScope upload artifacts.
 
-Produces, under --out-dir (a git working tree), the layout designed for the douyin dataset:
+Produces, under --out-dir (a plain staging tree, uploaded as-is by ms_upload.py), the
+type-separated layout of the douyin dataset:
 
     video/{date}/{station}/{date}_{station}_shard{NN}.tar   # bin-packed rooms, each shard <= --shard-gb
-    text/{date}/{station}.tar.gz                            # all rooms' csv/meta/db/logs (small, kept local too)
-    manifest/{date}/{station}.json                          # room->shard index + sha256 + brief
+    audio/{date}/{station}.tar                              # lossless FLAC, {room_id}/{segment}.flac inside
+    text/{date}/{station}.tar.gz                            # all rooms' csv/meta/db/logs/transcript (kept local too)
+    manifest/{date}/{station}.json                          # room->shard/audio index + sha256 + brief
 
 Rooms are keyed by numeric room_id (from each anchor dir's meta.json), never the display name.
-Video is bin-packed whole-room (never split) into <=7GB shards. Text is one gzip bundle.
+Video is bin-packed whole-room (never split) into <=7GB shards. Audio + text are one bundle each.
 
 Usage:
-    python fleet/pack.py --station st01 --date 20260727 --after 1920 \
-        --data-dir data --out-dir /path/to/douyin
+    python fleet/pack.py --station st01 --date 20260727 \
+        --data-dir data --out-dir <staging-dir>
 """
 import argparse, hashlib, io, json, os, sys, tarfile, time
 from pathlib import Path
@@ -45,10 +47,9 @@ def csv_rows(path):
     return max(0, n - 1)
 
 
-def discover(data_dir, date, after=0):
+def discover(data_dir, date):
     """Return room dicts for this date. v2 layout: data/{date}/{anchor}/ — the anchor dir
-    IS the session (files live directly inside; no per-session subdir).
-    `after` is accepted for compatibility but ignored: date-at-root already scopes to the date."""
+    IS the session (files live directly inside; no per-session subdir)."""
     rooms = []
     base = Path(data_dir) / date
     if not base.is_dir():
@@ -121,9 +122,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--station", required=True)
     ap.add_argument("--date", required=True, help="YYYYMMDD")
-    ap.add_argument("--after", type=int, default=0, help="only sessions with HHMM >= this")
     ap.add_argument("--data-dir", default="data")
-    ap.add_argument("--out-dir", required=True, help="git working tree root")
+    ap.add_argument("--out-dir", required=True, help="staging tree root")
     ap.add_argument("--shard-gb", type=float, default=7.0)
     args = ap.parse_args()
 
@@ -137,9 +137,9 @@ def main():
     for d in (vdir, adir, tdir, mdir):
         d.mkdir(parents=True, exist_ok=True)
 
-    rooms = discover(args.data_dir, date, args.after)
+    rooms = discover(args.data_dir, date)
     if not rooms:
-        print(f"[pack] no sessions for date={date} after={args.after} in {args.data_dir}", file=sys.stderr)
+        print(f"[pack] no sessions for date={date} in {args.data_dir}", file=sys.stderr)
         sys.exit(1)
     print(f"[pack] {len(rooms)} rooms: " +
           ", ".join(f"{r['name']}({r['outcome']},{r['video_bytes']//(1<<20)}MB)" for r in rooms))

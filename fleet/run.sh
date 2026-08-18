@@ -132,7 +132,7 @@ fi
 
 # ---------------- stage: transcribe (SenseVoice-Small, CPU) ----------------
 if [ -n "${WANT[transcribe]:-}" ]; then
-  say "STAGE transcribe — SenseVoice-Small (CPU) -> transcript.csv + <seg>.16k.opus"
+  say "STAGE transcribe — SenseVoice-Small (CPU) -> transcript.csv + <seg>.16k.flac"
   ASR_PY="$(find_ms_py)"; [ -z "$ASR_PY" ] && ASR_PY="$PY"
   "$ASR_PY" fleet/transcribe.py "data/$DATE" --jobs "${ASR_JOBS:-1}" || say "⚠ transcribe had issues"
 fi
