@@ -63,7 +63,7 @@ json.dump(stats, open(out, "w", encoding="utf-8"), ensure_ascii=False)
 PYEOF
 ) || log "WARN align/check had issues (non-fatal)"
 
-# ---------- A3. transcribe (SenseVoice-Small, CPU) -> transcript.csv + <seg>.16k.opus ----------
+# ---------- A3. transcribe (SenseVoice-Small, CPU) -> transcript.csv + <seg>.16k.flac ----------
 # Uses $PY (the .venv-asr with funasr+torch). Non-fatal: a missing ASR env just skips transcripts.
 log "transcribe (SenseVoice-Small, CPU, jobs=${ASR_JOBS:-1}) ..."
 ASR_JSON="$(mktemp)"

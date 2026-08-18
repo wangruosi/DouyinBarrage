@@ -9,7 +9,8 @@ Per room, for each recorded video segment:
      via align.video_to_wall (so transcript shares the chat/like/social axis)
   4. encode a compact Opus copy of the audio (for the `audio/` upload artifact)
 Writes  transcript.csv  (time, video_pts_s, end, segment_file, text, emotion, event, lang)
-and      <segment>.16k.opus  next to the video.  Runs after align (needs timing_*.csv).
+and      <segment>.16k.flac  next to the video (one per video segment — mirrors the recorder's
+segmentation; kept losslessly for later re-transcription).  Runs after align (needs timing_*.csv).
 
 CLI:
   python fleet/transcribe.py <session_dir | data/DATE>   [--jobs N] [--keep-wav]
@@ -53,8 +54,9 @@ def extract_wav(video, wav):
     _run(["ffmpeg", "-y", "-v", "error", "-i", video, "-ac", "1", "-ar", "16000", "-f", "wav", wav])
 
 
-def encode_opus(wav, opus):
-    _run(["ffmpeg", "-y", "-v", "error", "-i", wav, "-c:a", "libopus", "-b:a", "16k", opus])
+def encode_flac(wav, flac):
+    # lossless 16k mono FLAC — bit-exact voice audio for later VibeVoice re-transcription
+    _run(["ffmpeg", "-y", "-v", "error", "-i", wav, "-c:a", "flac", "-compression_level", "8", flac])
 
 
 def parse_tagged(text, words, ts):
@@ -140,9 +142,9 @@ def transcribe_session(session_dir, keep_wav=False):
                                  end=round(s["end_ms"] / 1000.0, 3),
                                  segment_file=os.path.basename(v), text=s["text"],
                                  emotion=s["emotion"], event=s["event"], lang=s["lang"]))
-            # compact audio artifact for upload (encode from the wav we already have)
+            # lossless audio artifact for upload (encode from the wav we already have)
             try:
-                encode_opus(wav, os.path.join(session_dir, stem + ".16k.opus"))
+                encode_flac(wav, os.path.join(session_dir, stem + ".16k.flac"))
             except Exception:
                 pass
         finally:

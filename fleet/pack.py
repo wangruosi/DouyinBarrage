@@ -15,11 +15,11 @@ Usage:
     python fleet/pack.py --station st01 --date 20260727 --after 1920 \
         --data-dir data --out-dir /path/to/douyin
 """
-import argparse, hashlib, io, json, os, sys, tarfile, time
+import argparse, hashlib, io, json, os, shutil, sys, tarfile, time
 from pathlib import Path
 
 VIDEO_EXT = {".mp4", ".ts", ".flv"}
-AUDIO_EXT = {".opus", ".m4a", ".ogg", ".aac"}   # compact ASR audio -> its own upload artifact
+AUDIO_EXT = {".flac", ".opus", ".m4a", ".ogg", ".aac"}   # voice audio -> its own upload artifact
 SKIP_EXT = {".wav"}                              # transient 16k wav (ASR scratch) — never uploaded
 # text/sidecar files that travel in the text bundle (everything that is not bulky video/audio)
 TEXT_SUFFIXES = (".csv", ".json")
@@ -131,7 +131,7 @@ def main():
     st, date = args.station, args.date
     out = Path(args.out_dir)
     vdir = out / "video" / date / st
-    adir = out / "audio" / date
+    adir = out / "audio" / date / st          # per-room per-segment FLAC lives under here
     tdir = out / "text" / date
     mdir = out / "manifest" / date
     for d in (vdir, adir, tdir, mdir):
@@ -172,18 +172,26 @@ def main():
                     sha256=sha256_file(text_path))
     print(f"[pack] text bundle: {text_path.stat().st_size/(1<<20):.1f} MB")
 
-    # ---- audio bundle (compact Opus, one tar per station; opus is already compressed) ----
-    audio_rec = None
-    if any(r["audio_files"] for r in rooms):
-        audio_name = f"{st}.tar"
-        audio_path = adir / audio_name
-        with tarfile.open(audio_path, "w") as tar:
-            for r in rooms:
-                for f in r["audio_files"]:
-                    add_to_tar(tar, f, rel_arc(r, f))
-        audio_rec = dict(file=f"{date}/{audio_name}", bytes=audio_path.stat().st_size,
-                         sha256=sha256_file(audio_path))
-        print(f"[pack] audio bundle: {audio_path.stat().st_size/(1<<20):.1f} MB")
+    # ---- audio: per-room per-segment FLAC files (NOT tarred) ----
+    # Layout: audio/{date}/{station}/{room_id}/{segment}.flac — mirrors the recorder's
+    # segmentation (one FLAC per video segment) and stays directly pullable later for
+    # VibeVoice re-transcription (no whole-station download/extract needed).
+    room_audio = {}            # room_id -> [ {file, bytes, sha256}, ... ]
+    audio_total = 0
+    for r in rooms:
+        recs = []
+        for f in r["audio_files"]:
+            arc = rel_arc(r, f)                    # {room_id}/{segment}.flac
+            dst = adir / arc
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(f, dst)
+            sz = dst.stat().st_size; audio_total += sz
+            recs.append(dict(file=f"{date}/{st}/{arc}", bytes=sz, sha256=sha256_file(dst)))
+        if recs:
+            room_audio[r["room_id"]] = recs
+    if room_audio:
+        print(f"[pack] audio: {sum(len(v) for v in room_audio.values())} FLAC segment(s) "
+              f"across {len(room_audio)} rooms, {audio_total/(1<<20):.1f} MB")
 
     # ---- manifest / brief ----
     manifest = dict(
@@ -192,10 +200,11 @@ def main():
         idle=None,  # set by postrun after asserting recorder exited
         shards=shard_records,
         text_bundle=text_rec,
-        audio_bundle=audio_rec,
+        audio_format="flac/16k/mono",
         rooms=[dict(room_id=r["room_id"], live_id=r["live_id"], name=r["name"],
                     shard=room_to_shard.get(r["room_id"]),
                     video_bytes=r["video_bytes"], video_files=len(r["video_files"]),
+                    audio=room_audio.get(r["room_id"], []),      # per-segment FLAC files (pullable)
                     audio_bytes=r["audio_bytes"], chat_rows=r["chat_rows"],
                     outcome=r["outcome"],
                     transcribed=r["transcript_rows"] > 0,
@@ -208,6 +217,7 @@ def main():
                      transcribed=sum(r["transcript_rows"] > 0 for r in rooms),
                      video_gb=round(sum(r["video_bytes"] for r in rooms) / (1 << 30), 2),
                      audio_mb=round(sum(r["audio_bytes"] for r in rooms) / (1 << 20), 1),
+                     audio_segments=sum(len(v) for v in room_audio.values()),
                      shards=len(shard_records)),
         upload="pending",
     )
