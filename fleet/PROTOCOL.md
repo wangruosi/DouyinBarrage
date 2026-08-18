@@ -63,12 +63,13 @@ ffmpeg -version   # must exist (needs the flac + libx264 muxers — standard bui
 ```
 
 ### 2.2 Get the project
+Clone **only** the `feat/v2` branch, shallow (latest commit, no other branches/history — much smaller):
 ```bash
 cd ~
-git clone git@github.com:wangruosi/DouyinBarrage.git
+git clone --branch feat/v2 --single-branch --depth 1 \
+  git@github.com:wangruosi/DouyinBarrage.git
 cd DouyinBarrage
-git checkout feat/v2                 # REQUIRED: the v2 fleet code lives on this branch
-git branch --show-current            # -> feat/v2
+git branch --show-current            # -> feat/v2  (already on it — no checkout needed)
 ls fleet/   # -> nightly.sh postrun.sh pack.py ms_upload.py transcribe.py run.sh station.env PROTOCOL.md
 ```
 
@@ -76,10 +77,11 @@ ls fleet/   # -> nightly.sh postrun.sh pack.py ms_upload.py transcribe.py run.sh
 ```bash
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt   # recorder + SenseVoice (FunASR) + ModelScope SDK (CPU torch)
+# pre-fetch the ASR models NOW (~900 MB), so the first night doesn't stall on the download:
+.venv/bin/python -c "from funasr import AutoModel; AutoModel(model='iic/SenseVoiceSmall', vad_model='fsmn-vad', disable_update=True)"
 ```
-The first nightly run downloads the SenseVoice-Small model (~900 MB) + VAD into
-`~/.cache/modelscope` once, then reuses it. (The scripts call `.venv/bin/python` directly —
-you never need to `activate` it.)
+That caches SenseVoice-Small + the VAD into `~/.cache/modelscope`; nightly runs reuse them.
+(The scripts call `.venv/bin/python` directly — you never need to `activate` it.)
 
 ### 2.4 Douyin cookie (recommended)
 ```bash
@@ -103,16 +105,17 @@ echo 'export MODELSCOPE_API_TOKEN=<YOUR_TOKEN>' >> ~/.bashrc && source ~/.bashrc
 **Never commit the token or paste it into tracked files.**
 
 ### 2.7 Configure this station — `fleet/station.env`
+Open **`fleet/station.env`** in an editor and change the values below **in the file** — it's a bash
+file the scripts *source*, so you edit the assignments in place (don't run them as commands):
 ```bash
 STATION=st01                    # unique id for THIS workstation (st01, st02, …)
-REPO_ID=SISU_DynCogLab/douyin   # the dataset (default is correct; leave it)
 START_AT=20:00                  # window start (local time)
-MINUTES=120                     # window length (2h)
-UPLOAD_DELAY=0                  # seconds to wait before uploading — STAGGER per station:
-                                #   st01=0  st02=1800(+30m)  st03=3600(+1h)  st04=5400 …
+MINUTES=120                     # window length in minutes (120 = 2h)
+UPLOAD_DELAY=0                  # seconds to wait before uploading — STAGGER per station so the
+                                # fleet doesn't all push at once: st01=0 st02=1800(+30m) st03=3600(+1h) …
 ```
-`APP_DIR`/`DATA_DIR`/`ASR_JOBS`/`SHARD_GB`/`DISK_FLOOR_GB` auto-derive or have good defaults — leave them.
-Staggering `UPLOAD_DELAY` keeps the fleet from all pushing at the same moment.
+`REPO_ID` already defaults to the production dataset (leave it). `APP_DIR`/`DATA_DIR`/`ASR_JOBS`/
+`SHARD_GB`/`DISK_FLOOR_GB` auto-derive or have good defaults — leave them.
 
 ### 2.8 Verify recording config — `config.yaml`
 ```yaml
