@@ -5,9 +5,7 @@ set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$HERE/station.env"
 
-export DATE="$(date +%Y%m%d)"
-# AFTER = window start minus 10 min (HHMM) — the lower bound pack.py uses to pick tonight's sessions
-export AFTER="$(date -d "$START_AT today -10 minutes" +%H%M 2>/dev/null || echo 0000)"
+export DATE="$(date +%Y%m%d)"   # v2: date-at-root scopes tonight's data; no AFTER filter needed
 
 # log to file + console (cron discards console; interactive runs still see it)
 mkdir -p "$APP_DIR/logs"
