@@ -114,17 +114,10 @@ cp -f "$STAGING/text/$DATE/$STATION.tar.gz" "$ARCHIVE/text/$DATE/" 2>/dev/null &
 cp -f "$MANIFEST" "$ARCHIVE/manifest/$DATE/$STATION.json" 2>/dev/null || true
 
 # ---------- B3. upload stagger — offset stations so they don't all commit at once ----------
-# Pack/align/transcribe/archive already ran; only the network push is deferred (purge stays
-# gated on a verified upload). Set ONE per station in station.env:
-#   UPLOAD_AT=HH:MM   wait until that clock time (takes precedence), OR
-#   UPLOAD_DELAY=<s>  wait this many seconds before uploading.
-if [ -n "${UPLOAD_AT:-}" ]; then
-  target=$(date -d "today $UPLOAD_AT" +%s 2>/dev/null || echo 0); now=$(date +%s)
-  [ "$target" -lt "$now" ] && target=$(date -d "tomorrow $UPLOAD_AT" +%s 2>/dev/null || echo "$now")
-  wait=$(( target - now ))
-  [ "$wait" -gt 0 ] && { log "upload stagger: waiting until $UPLOAD_AT (${wait}s)"; sleep "$wait"; }
-elif [ "${UPLOAD_DELAY:-0}" -gt 0 ] 2>/dev/null; then
-  log "upload stagger: sleeping ${UPLOAD_DELAY}s (UPLOAD_DELAY)"; sleep "$UPLOAD_DELAY"
+# Only the network push is deferred (pack/align/transcribe/archive already ran; purge stays
+# gated on a verified upload). UPLOAD_DELAY seconds is set per station in station.env.
+if [ "${UPLOAD_DELAY:-0}" -gt 0 ] 2>/dev/null; then
+  log "upload stagger: sleeping ${UPLOAD_DELAY}s before push (UPLOAD_DELAY)"; sleep "$UPLOAD_DELAY"
 fi
 
 # ---------- C. upload via SDK (retry-429 + verify) ----------
