@@ -121,10 +121,11 @@ say "recorded ${#SESS[@]} session(s)"
 RC=0
 # ---------------- stage: check ----------------
 if [ -n "${WANT[check]:-}" ]; then
-  say "STAGE check — real-time keep-up / bandwidth verdict"
+  say "STAGE check — bandwidth (pipe) + completeness (payload coverage)"
   "$PY" - "${SESS[@]}" <<'PY' || RC=$?
 import sys, align
-sys.exit(1 if (align.report(sys.argv[1:]) or {}).get("bandwidth_limited") else 0)
+r = align.check(sys.argv[1:]) or {}          # tags sessions, then both verdicts
+sys.exit(1 if (r.get("bandwidth") or {}).get("bandwidth_limited") else 0)
 PY
   [ "$RC" -ne 0 ] && say "⚠ bandwidth-limited"
 fi

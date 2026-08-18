@@ -48,51 +48,44 @@ with cf.ThreadPoolExecutor(max_workers=min(16, os.cpu_count() or 4)) as ex:
 print(f"[convert] {ok}/{len(ts)} segments -> mp4")
 PYEOF
 
-# ---------- A2. align chat/like/social/stats -> *_aligned.csv ----------
-log "align sessions ..."
-( cd "$APP_DIR" && python3 - "$DATA_DIR" "$DATE" <<'PYEOF'
-import sys, glob, os
-sys.path.insert(0, os.getcwd())
-data, date = sys.argv[1], sys.argv[2]
-try: from align import tag_all
-except Exception as e: print("[align] import failed:", e); sys.exit(0)
-n = sum(1 for s in sorted(glob.glob(f"{data}/{date}/*")) if os.path.isdir(s) and tag_all(s))
-print(f"[align] aligned {n} rooms")
-PYEOF
-) || log "WARN align had issues (non-fatal)"
-
-# ---------- A3. bandwidth verdict -> compact JSON for the manifest ----------
-log "bandwidth verdict ..."
-BW_JSON="$(mktemp)"
-( cd "$APP_DIR" && python3 - "$DATA_DIR" "$DATE" "$BW_JSON" <<'PYEOF'
+# ---------- A2. align + thorough check (bandwidth pipe + payload completeness) ----------
+# align.check tags every session (chat/like/... -> *_aligned.csv, needed by the text bundle),
+# then prints both verdicts and returns {bandwidth, completeness} for the manifest.
+log "align + thorough check ..."
+CHECK_JSON="$(mktemp)"
+( cd "$APP_DIR" && python3 - "$DATA_DIR" "$DATE" "$CHECK_JSON" <<'PYEOF'
 import sys, glob, os, json
 sys.path.insert(0, os.getcwd()); import align
 data, date, out = sys.argv[1], sys.argv[2], sys.argv[3]
-stats = align.report(sorted(glob.glob(f"{data}/{date}/*"))) or {}
+sessions = sorted(s for s in glob.glob(f"{data}/{date}/*") if os.path.isdir(s))
+stats = align.check(sessions) or {}
 json.dump(stats, open(out, "w", encoding="utf-8"), ensure_ascii=False)
 PYEOF
-) || log "WARN bandwidth verdict had issues (non-fatal)"
+) || log "WARN align/check had issues (non-fatal)"
 
 # ---------- B. pack tonight's sessions into a plain staging tree ----------
 log "pack -> $STAGING ..."
 rm -rf "$STAGING"
 if ! python3 "$HERE/pack.py" --station "$STATION" --date "$DATE" \
       --data-dir "$DATA_DIR" --out-dir "$STAGING" --shard-gb "$SHARD_GB"; then
-  log "pack FAILED — aborting (nothing purged)"; rm -f "$BW_JSON"; exit 1
+  log "pack FAILED — aborting (nothing purged)"; rm -f "$CHECK_JSON"; exit 1
 fi
 
 # ---------- B1. fold idle + bandwidth into the staging manifest (uploaded with the data) ----------
 MANIFEST="$STAGING/manifest/$DATE/$STATION.json"
-python3 - "$MANIFEST" "$IDLE" "$BW_JSON" <<'PYEOF' || true
+python3 - "$MANIFEST" "$IDLE" "$CHECK_JSON" <<'PYEOF' || true
 import json, sys, os
-p, idle, bw = sys.argv[1], sys.argv[2], sys.argv[3]
+p, idle, cj = sys.argv[1], sys.argv[2], sys.argv[3]
 m = json.load(open(p, encoding="utf-8")); m["idle"] = (idle == "true")
 try:
-    if bw and os.path.exists(bw): m["bandwidth"] = json.load(open(bw, encoding="utf-8"))
+    if cj and os.path.exists(cj):
+        chk = json.load(open(cj, encoding="utf-8"))
+        m["bandwidth"] = chk.get("bandwidth")
+        m["completeness"] = chk.get("completeness")
 except Exception: pass
 json.dump(m, open(p, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
 PYEOF
-rm -f "$BW_JSON"
+rm -f "$CHECK_JSON"
 
 # ---------- B2. archive text bundle + manifest locally (kept forever) ----------
 mkdir -p "$ARCHIVE/text/$DATE" "$ARCHIVE/manifest/$DATE"

@@ -16,6 +16,10 @@ Usage:
   # per-room health: segments, break durations, in_gap/outside counts
   # (point at one session dir, or a parent like data/ for every room)
   python align.py summary <session_dir | data/>
+
+  # thorough post-run check: bandwidth verdict (pipe) + completeness verdict (payload
+  # coverage — uncovered audience-timeline seconds, events with no video, align failures)
+  python align.py check <session_dir | data/>
 """
 import csv, os, sys, glob, subprocess
 from datetime import datetime
@@ -299,11 +303,190 @@ def report(sessions):
     }
 
 
+# ───────────────────────── #2 thorough check: payload completeness ─────────────────────────
+# report() above checks the PIPE (did the recorder keep up with real time?). The completeness
+# layer below checks the PAYLOAD (does the recorded video actually cover the audience timeline?):
+# a room can pass the bandwidth verdict yet still have chat/like/social events during a window
+# with no video (mid-session reconnect, offline blip, late start / early cut).
+
+def _csv_times(path):
+    """Sorted list of wall epochs from a data csv's 'time' column ([] if absent)."""
+    if not os.path.exists(path):
+        return []
+    ts = []
+    with open(path, encoding='utf-8-sig') as f:
+        for r in csv.DictReader(f):
+            v = r.get('time')
+            if not v:
+                continue
+            try:
+                ts.append(parse_time(v))
+            except Exception:
+                pass
+    ts.sort()
+    return ts
+
+
+def _union_len(intervals, lo, hi):
+    """Length of union(intervals) clipped to [lo,hi]; plus (first_start, last_end) of the
+    clipped cover, or (None,None) if nothing overlaps."""
+    clip = sorted((max(a, lo), min(b, hi)) for a, b in intervals if min(b, hi) > max(a, lo))
+    if not clip:
+        return 0.0, None, None
+    total = 0.0
+    cur_s, cur_e = clip[0]
+    for a, b in clip[1:]:
+        if a > cur_e:
+            total += cur_e - cur_s; cur_s, cur_e = a, b
+        else:
+            cur_e = max(cur_e, b)
+    total += cur_e - cur_s
+    return total, clip[0][0], cur_e
+
+
+def completeness_session(session_dir, s):
+    """Payload-coverage metrics for one session, given its summarize_session() dict `s`.
+
+    Two independent views of 'did we miss anything':
+      • event view  — audience rows tagged 'outside' (no covering video) in *_aligned.csv
+      • time view   — wall seconds inside the chat span with no video (head/inner/tail gaps)
+    Plus an alignment-sanity check: every data csv present must have produced *_aligned.csv.
+    """
+    intervals = [(seg[1], seg[3]) for seg in s['segs']]   # (wall_start, wall_end) per segment
+
+    # ── event view: roll up discrete audience streams (exclude stats = periodic snapshots) ──
+    ev_tot = ev_out = ev_gap = 0
+    for kind, (t, g, o) in s['aligned'].items():
+        if kind == 'stats':
+            continue
+        ev_tot += t; ev_gap += g; ev_out += o
+    ev_cov = (ev_tot - ev_out) / ev_tot if ev_tot else None
+
+    # ── time view: chat timeline is the audience-activity reference (fall back if no chat) ──
+    chat = _csv_times(os.path.join(session_dir, 'chat.csv'))
+    if not chat:
+        for k in ('like', 'social', 'gift', 'member'):
+            chat = _csv_times(os.path.join(session_dir, k + '.csv'))
+            if chat:
+                break
+    cstart = cend = cspan = uncovered = head = tail = inner = time_cov = None
+    if chat and intervals:
+        cstart, cend = chat[0], chat[-1]
+        cspan = cend - cstart
+        covered, fs, le = _union_len(intervals, cstart, cend)
+        uncovered = max(0.0, cspan - covered)
+        head = max(0.0, fs - cstart) if fs is not None else cspan     # chat before any video
+        tail = max(0.0, cend - le) if le is not None else 0.0         # chat after last video
+        inner = max(0.0, uncovered - head - tail)                     # holes between segments
+        time_cov = covered / cspan if cspan > 0 else 1.0
+
+    # ── alignment sanity: data present but not tagged (silent align failure) ──
+    missing = [k for k in _TAGGABLE
+               if os.path.exists(os.path.join(session_dir, k + '.csv'))
+               and not os.path.exists(os.path.join(session_dir, k + '_aligned.csv'))]
+
+    return dict(events=ev_tot, ev_outside=ev_out, ev_in_gap=ev_gap, ev_cov=ev_cov,
+                chat_span=cspan, uncovered_s=uncovered, head_gap=head, tail_gap=tail,
+                inner_gap=inner, time_cov=time_cov, missing_aligned=missing,
+                cstart=cstart, cend=cend,
+                vstart=intervals[0][0] if intervals else None,
+                vend=max((b for _, b in intervals), default=None))
+
+
+def completeness(sessions):
+    """Print the per-room + fleet completeness verdict; return a compact dict for the manifest."""
+    GAP_MIN = 5.0        # uncovered seconds below this = effectively complete (rounding/jitter)
+    EVCOV_MIN = 0.99     # >=99% of audience events must map into video to count as 'complete'
+    rows = []
+    for sd in sessions:
+        s = summarize_session(sd)
+        if not s:
+            continue
+        label = os.path.basename(sd)
+        rows.append((label, completeness_session(sd, s)))
+    if not rows:
+        return {}
+
+    def complete(c):
+        return ((c['uncovered_s'] is None or c['uncovered_s'] < GAP_MIN)
+                and (c['ev_cov'] is None or c['ev_cov'] >= EVCOV_MIN)
+                and not c['missing_aligned'])
+
+    ncomplete = sum(complete(c) for _, c in rows)
+    gappy = sorted((r for r in rows if not complete(r[1])),
+                   key=lambda r: -((r[1]['uncovered_s'] or 0) + (1 - (r[1]['ev_cov'] or 1)) * 1e4))
+    unc_tot = sum(c['uncovered_s'] or 0 for _, c in rows)
+    ev_tot = sum(c['events'] for _, c in rows)
+    ev_out = sum(c['ev_outside'] for _, c in rows)
+    align_fail = [l for l, c in rows if c['missing_aligned']]
+    opening = sorted(((l, c['head_gap']) for l, c in rows if (c['head_gap'] or 0) >= GAP_MIN),
+                     key=lambda x: -x[1])
+
+    print("\n" + "=" * 64)
+    print(f"COMPLETENESS (payload coverage) — {len(rows)} rooms")
+    print(f"  {ncomplete}/{len(rows)} rooms fully covered "
+          f"(uncovered <{int(GAP_MIN)}s & events≥{EVCOV_MIN:.0%})")
+    print(f"  uncovered audience-timeline: {_fmt_dur(unc_tot)} total across all rooms")
+    if ev_tot:
+        print(f"  audience events with no video: {ev_out}/{ev_tot} ({ev_out/ev_tot:.2%})")
+    if gappy:
+        print("  rooms with gaps (uncovered = head/inner/tail | events out/total):")
+        for l, c in gappy[:12]:
+            u = _fmt_dur(c['uncovered_s']) if c['uncovered_s'] is not None else "?"
+            hit = (f"{_fmt_dur(c['head_gap'])}/{_fmt_dur(c['inner_gap'])}/{_fmt_dur(c['tail_gap'])}"
+                   if c['uncovered_s'] is not None else "n/a")
+            ev = f"{c['ev_outside']}/{c['events']}" if c['events'] else "no-events"
+            mark = "  ⚠ANLGN" if c['missing_aligned'] else ""
+            print(f"    {u:>7}  ({hit})  events {ev}  {l}{mark}")
+    if opening:
+        print("  ⚠ opening missed (chat before video starts): "
+              + ", ".join(f"{l} {_fmt_dur(g)}" for l, g in opening[:8]))
+    if align_fail:
+        print("  ⚠ ALIGNMENT FAILURES (data present, not tagged): " + ", ".join(align_fail[:8]))
+    else:
+        print("  ✓ alignment: every data stream tagged to the timeline")
+    print("=" * 64)
+
+    return {
+        'rooms': len(rows), 'rooms_complete': ncomplete,
+        'rooms_with_gaps': len(rows) - ncomplete,
+        'uncovered_s_total': round(unc_tot, 1),
+        'events_total': ev_tot, 'events_uncovered': ev_out,
+        'event_cov': round((ev_tot - ev_out) / ev_tot, 4) if ev_tot else None,
+        'align_failures': align_fail,
+        'worst': [{'room': l, 'uncovered_s': round(c['uncovered_s'], 1) if c['uncovered_s'] is not None else None,
+                   'head_s': round(c['head_gap'], 1) if c['head_gap'] is not None else None,
+                   'inner_s': round(c['inner_gap'], 1) if c['inner_gap'] is not None else None,
+                   'tail_s': round(c['tail_gap'], 1) if c['tail_gap'] is not None else None,
+                   'ev_cov': round(c['ev_cov'], 4) if c['ev_cov'] is not None else None}
+                  for l, c in gappy[:12]],
+    }
+
+
+def check(sessions):
+    """Full post-run check: bandwidth verdict (pipe) + completeness verdict (payload).
+    Tags each session first (idempotent) so completeness never mistakes 'not yet tagged'
+    for a real alignment failure. Returns {'bandwidth':..., 'completeness':...} for the manifest."""
+    for sd in sessions:
+        try:
+            tag_all(sd)
+        except Exception:
+            pass
+    return {'bandwidth': report(sessions), 'completeness': completeness(sessions)}
+
+
 def cmd_summary(path):
     sessions = discover_sessions(path)
     if not sessions:
         sys.exit(f"no timing_*.csv found under {path}")
     report(sessions)
+
+
+def cmd_check(path):
+    sessions = discover_sessions(path)
+    if not sessions:
+        sys.exit(f"no timing_*.csv found under {path}")
+    check(sessions)
 
 
 if __name__ == '__main__':
@@ -318,5 +501,7 @@ if __name__ == '__main__':
         cmd_frame(sess, sys.argv[3], sys.argv[4] if len(sys.argv) > 4 else 'frame.jpg')
     elif action == 'summary':
         cmd_summary(sess)
+    elif action == 'check':
+        cmd_check(sess)
     else:
         print(__doc__); sys.exit(1)
