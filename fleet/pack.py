@@ -43,47 +43,40 @@ def csv_rows(path):
     return max(0, n - 1)
 
 
-def discover(data_dir, date, after):
-    """Return list of room dicts for sessions of this date at/after HHMM `after`."""
+def discover(data_dir, date, after=0):
+    """Return room dicts for this date. v2 layout: data/{date}/{anchor}/ — the anchor dir
+    IS the session (files live directly inside; no per-session subdir).
+    `after` is accepted for compatibility but ignored: date-at-root already scopes to the date."""
     rooms = []
-    for anchor_dir in sorted(p for p in Path(data_dir).iterdir() if p.is_dir()):
+    base = Path(data_dir) / date
+    if not base.is_dir():
+        return rooms
+    for anchor_dir in sorted(p for p in base.iterdir() if p.is_dir()):
         meta_path = anchor_dir / "meta.json"
-        if not meta_path.exists():
-            continue
-        meta = json.loads(meta_path.read_text(encoding="utf-8"))
-        room_id = str(meta.get("room_id") or meta.get("live_id"))
-        live_id = str(meta.get("live_id", ""))
-        name = meta.get("anchor_name", anchor_dir.name)
-        # session dirs like 20260727_1924 belonging to this date, HHMM >= after
-        sessions = []
-        for s in sorted(anchor_dir.iterdir()):
-            if not s.is_dir() or not s.name.startswith(date + "_"):
-                continue
-            try:
-                hhmm = int(s.name.split("_", 1)[1][:4])
-            except (IndexError, ValueError):
-                continue
-            if hhmm >= after:
-                sessions.append(s)
-        if not sessions:
-            continue
+        if meta_path.exists():
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            room_id = str(meta.get("room_id") or meta.get("live_id"))
+            live_id = str(meta.get("live_id", ""))
+            name = meta.get("anchor_name", anchor_dir.name)
+        else:  # e.g. a re-open dir without meta; key by the dir name
+            room_id, live_id, name = anchor_dir.name, "", anchor_dir.name
 
-        video_files, text_files, video_bytes, chat_rows = [], [], 0, 0
-        for s in sessions:
-            for f in sorted(s.rglob("*")):
-                if f.is_dir():
-                    continue
-                if f.suffix.lower() in VIDEO_EXT:
-                    video_files.append(f)
-                    video_bytes += f.stat().st_size
-                else:  # csv, json, db, wal, shm, logs/* -> text bundle
-                    text_files.append(f)
-            chat_rows += csv_rows(s / "chat.csv")
+        video_files, text_files, video_bytes = [], [], 0
+        for f in sorted(anchor_dir.rglob("*")):
+            if f.is_dir():
+                continue
+            if f.suffix.lower() in VIDEO_EXT:
+                video_files.append(f); video_bytes += f.stat().st_size
+            else:  # csv, json, db, wal, shm, logs/* -> text bundle
+                text_files.append(f)
+        if not video_files and not text_files:
+            continue
+        chat_rows = csv_rows(anchor_dir / "chat.csv")
 
         outcome = "recorded" if video_files and chat_rows else \
                   ("error" if not video_files and not chat_rows else "partial")
         rooms.append(dict(room_id=room_id, live_id=live_id, name=name,
-                          anchor_dir=anchor_dir, sessions=sessions,
+                          anchor_dir=anchor_dir, sessions=[anchor_dir],
                           video_files=video_files, text_files=text_files,
                           video_bytes=video_bytes, chat_rows=chat_rows,
                           outcome=outcome))

@@ -1,163 +1,122 @@
 #!/usr/bin/env bash
-# fleet/postrun.sh — after recording: assert-idle -> pack -> upload+verify -> purge -> status.
+# fleet/postrun.sh (v2) — after recording:
+#   assert-idle -> convert ts->mp4 -> align -> bandwidth verdict -> pack(staging) -> upload(SDK) -> purge -> status
 #
-# Purge is GATED on a verified upload: if upload fails, NOTHING local is deleted (retry next night).
-# Kept forever locally: text bundle + manifest. Deleted after verify: raw video + LFS blob cache.
-#
-# Config comes from station.env (same dir). DATE/AFTER may be exported by nightly.sh; otherwise
-# they default to today / 0000.
+# No git clone. Uploads via fleet/ms_upload.py (upload_folder + retry-429 + verify).
+# Purge is GATED on a verified upload; text bundle + manifest are archived locally forever.
+# Layout: data/{DATE}/{anchor}/  ->  staging/{video,text,manifest}/{DATE}/{STATION}/...
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$HERE/station.env"
-
 DATE="${DATE:-$(date +%Y%m%d)}"
-AFTER="${AFTER:-0000}"
 log() { echo "[postrun $(date '+%F %T')] $*"; }
 
-# ---------- A. assert the recorder is gone (the 'is the station off?' check) ----------
+STAGING="$APP_DIR/upload_staging/$DATE"
+ARCHIVE="$APP_DIR/archive"
+# python with the modelscope SDK (for ms_upload). Inline convert/align blocks use plain python3.
+PY="${MS_PY:-$APP_DIR/.venv-asr/bin/python}"; [ -x "$PY" ] || PY=python3
+
+# ---------- A. assert the recorder is gone ----------
 if pgrep -f "python -u main.py" >/dev/null 2>&1; then
-  log "WARN recorder still running after window — sending SIGINT"
-  pkill -INT -f "python -u main.py" || true
+  log "WARN recorder still running — SIGINT"; pkill -INT -f "python -u main.py" || true
   for _ in $(seq 1 30); do pgrep -f "python -u main.py" >/dev/null 2>&1 || break; sleep 2; done
 fi
-if pgrep -f "python -u main.py" >/dev/null 2>&1; then IDLE=false; else IDLE=true; fi
+pgrep -f "python -u main.py" >/dev/null 2>&1 && IDLE=false || IDLE=true
 log "idle=$IDLE"
 
-# ---------- A1. deferred ts->mp4 convert (moved off the timed stop path, run in parallel) ----------
-# Recorder writes .ts (auto_convert disabled so timed stop is fast). Convert here, after the
-# process is gone, in parallel across all segments — validate with ffprobe, then drop the .ts.
+# ---------- A1. convert ts->mp4 (parallel) ----------
 log "convert ts->mp4 ..."
-python3 - "$DATA_DIR" "$DATE" <<'PY' || log "WARN convert step had issues (non-fatal)"
+python3 - "$DATA_DIR" "$DATE" <<'PYEOF' || log "WARN convert had issues (non-fatal)"
 import sys, glob, os, subprocess, concurrent.futures as cf
 data, date = sys.argv[1], sys.argv[2]
-ts_files = sorted(glob.glob(f"{data}/*/{date}_*/*.ts"))
-def conv(ts):
-    mp4 = ts[:-3] + ".mp4"
+ts = sorted(glob.glob(f"{data}/{date}/*/*.ts"))
+def conv(t):
+    mp4 = t[:-3] + ".mp4"
     if os.path.exists(mp4) and os.path.getsize(mp4) > 0:
-        if os.path.exists(ts): os.remove(ts)
-        return "skip"
-    if not os.path.exists(ts) or os.path.getsize(ts) == 0:
-        return "empty"
-    r = subprocess.run(["ffmpeg","-y","-v","error","-i",ts,"-c","copy",
-                        "-movflags","+faststart","-f","mp4",mp4],
-                       capture_output=True, timeout=600)
+        os.path.exists(t) and os.remove(t); return "skip"
+    if not os.path.exists(t) or os.path.getsize(t) == 0: return "empty"
+    r = subprocess.run(["ffmpeg","-y","-v","error","-i",t,"-c","copy","-movflags","+faststart","-f","mp4",mp4], capture_output=True, timeout=600)
     if r.returncode != 0 or not os.path.exists(mp4) or os.path.getsize(mp4) == 0:
         if os.path.exists(mp4) and os.path.getsize(mp4) == 0: os.remove(mp4)
         return "fail"
-    p = subprocess.run(["ffprobe","-v","error","-show_entries","format=duration",
-                        "-of","csv=p=0",mp4], capture_output=True, timeout=30)
-    if p.returncode != 0 or not p.stdout.strip():
-        os.remove(mp4); return "badprobe"
-    os.remove(ts); return "ok"
-if not ts_files:
-    print("[convert] no .ts (already mp4?)"); sys.exit(0)
-ok = 0
-with cf.ThreadPoolExecutor(max_workers=min(16, (os.cpu_count() or 4))) as ex:
-    for res in ex.map(conv, ts_files):
-        if res in ("ok","skip"): ok += 1
-print(f"[convert] {ok}/{len(ts_files)} segments -> mp4")
-PY
+    p = subprocess.run(["ffprobe","-v","error","-show_entries","format=duration","-of","csv=p=0",mp4], capture_output=True, timeout=30)
+    if p.returncode != 0 or not p.stdout.strip(): os.remove(mp4); return "badprobe"
+    os.remove(t); return "ok"
+if not ts: print("[convert] no .ts (already mp4?)"); sys.exit(0)
+with cf.ThreadPoolExecutor(max_workers=min(16, os.cpu_count() or 4)) as ex:
+    ok = sum(1 for r in ex.map(conv, ts) if r in ("ok","skip"))
+print(f"[convert] {ok}/{len(ts)} segments -> mp4")
+PYEOF
 
-# ---------- A2. deferred alignment (moved off the timed stop path) ----------
-# The recorder skips inline ts->video alignment during a timed stop (DOUYIN_DEFER_ALIGN=1) so it
-# exits fast; we run it here, after the process is gone, with time to spare (no window deadline).
-log "align tonight's sessions ..."
-( cd "$APP_DIR" && python3 - "$DATA_DIR" "$DATE" <<'PY'
+# ---------- A2. align chat/like/social/stats -> *_aligned.csv ----------
+log "align sessions ..."
+( cd "$APP_DIR" && python3 - "$DATA_DIR" "$DATE" <<'PYEOF'
 import sys, glob, os
 sys.path.insert(0, os.getcwd())
 data, date = sys.argv[1], sys.argv[2]
-try:
-    from align import tag_all
-except Exception as e:
-    print("[align] import failed:", e); sys.exit(0)
-n = 0
-for sess in sorted(glob.glob(f"{data}/*/{date}_*")):
-    try:
-        if tag_all(sess): n += 1
-    except Exception as e:
-        print("[align] skip", sess, e)
-print(f"[align] aligned {n} sessions")
-PY
-) || log "WARN alignment step had issues (non-fatal)"
+try: from align import tag_all
+except Exception as e: print("[align] import failed:", e); sys.exit(0)
+n = sum(1 for s in sorted(glob.glob(f"{data}/{date}/*")) if os.path.isdir(s) and tag_all(s))
+print(f"[align] aligned {n} rooms")
+PYEOF
+) || log "WARN align had issues (non-fatal)"
 
-# ---------- A3. bandwidth verdict (flow/coverage from the timing sidecars) ----------
-# MUST run before the purge (D removes the timing files). Prints the fleet verdict into the
-# log and captures a compact summary for the manifest (the morning brief).
+# ---------- A3. bandwidth verdict -> compact JSON for the manifest ----------
 log "bandwidth verdict ..."
 BW_JSON="$(mktemp)"
-( cd "$APP_DIR" && python3 - "$DATA_DIR" "$DATE" "$BW_JSON" <<'PY'
+( cd "$APP_DIR" && python3 - "$DATA_DIR" "$DATE" "$BW_JSON" <<'PYEOF'
 import sys, glob, os, json
-sys.path.insert(0, os.getcwd())
-import align
+sys.path.insert(0, os.getcwd()); import align
 data, date, out = sys.argv[1], sys.argv[2], sys.argv[3]
-sessions = sorted(glob.glob(f"{data}/*/{date}_*"))
-stats = align.report(sessions) or {}          # prints per-room detail + fleet verdict
+stats = align.report(sorted(glob.glob(f"{data}/{date}/*"))) or {}
 json.dump(stats, open(out, "w", encoding="utf-8"), ensure_ascii=False)
-PY
-) || log "WARN bandwidth verdict step had issues (non-fatal)"
+PYEOF
+) || log "WARN bandwidth verdict had issues (non-fatal)"
 
-# ---------- B. pack tonight's sessions into shards + text bundle + manifest ----------
-log "pack (station=$STATION date=$DATE after=$AFTER) ..."
-if ! python3 "$HERE/pack.py" --station "$STATION" --date "$DATE" --after "$AFTER" \
-      --data-dir "$DATA_DIR" --out-dir "$REPO" --shard-gb "$SHARD_GB"; then
-  log "pack FAILED — aborting (nothing purged)"; exit 1
+# ---------- B. pack tonight's sessions into a plain staging tree ----------
+log "pack -> $STAGING ..."
+rm -rf "$STAGING"
+if ! python3 "$HERE/pack.py" --station "$STATION" --date "$DATE" \
+      --data-dir "$DATA_DIR" --out-dir "$STAGING" --shard-gb "$SHARD_GB"; then
+  log "pack FAILED — aborting (nothing purged)"; rm -f "$BW_JSON"; exit 1
 fi
 
-# ---------- B2. archive text bundle locally (kept forever, independent of the push vehicle) ----------
-# The repo is a disposable push vehicle whose LFS cache we later nuke; the local-forever text
-# copy must live OUTSIDE it. Copy while the bundle is still real content (before any reclaim).
-ARCHIVE="$APP_DIR/archive"
-mkdir -p "$ARCHIVE/text/$DATE"
-cp -f "$REPO/text/$DATE/$STATION.tar.gz" "$ARCHIVE/text/$DATE/$STATION.tar.gz" 2>/dev/null \
-  && log "archived text -> $ARCHIVE/text/$DATE/$STATION.tar.gz" \
-  || log "WARN could not archive text bundle"
+# ---------- B1. fold idle + bandwidth into the staging manifest (uploaded with the data) ----------
+MANIFEST="$STAGING/manifest/$DATE/$STATION.json"
+python3 - "$MANIFEST" "$IDLE" "$BW_JSON" <<'PYEOF' || true
+import json, sys, os
+p, idle, bw = sys.argv[1], sys.argv[2], sys.argv[3]
+m = json.load(open(p, encoding="utf-8")); m["idle"] = (idle == "true")
+try:
+    if bw and os.path.exists(bw): m["bandwidth"] = json.load(open(bw, encoding="utf-8"))
+except Exception: pass
+json.dump(m, open(p, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
+PYEOF
+rm -f "$BW_JSON"
 
-# ---------- C. upload to master + verify remote LFS objects ----------
-log "upload+verify -> $BRANCH ..."
-if "$HERE/upload.sh" --repo "$REPO" --station "$STATION" --date "$DATE" --branch "$BRANCH"; then
+# ---------- B2. archive text bundle + manifest locally (kept forever) ----------
+mkdir -p "$ARCHIVE/text/$DATE" "$ARCHIVE/manifest/$DATE"
+cp -f "$STAGING/text/$DATE/$STATION.tar.gz" "$ARCHIVE/text/$DATE/" 2>/dev/null && log "archived text bundle" || log "WARN no text bundle to archive"
+cp -f "$MANIFEST" "$ARCHIVE/manifest/$DATE/$STATION.json" 2>/dev/null || true
+
+# ---------- C. upload via SDK (retry-429 + verify) ----------
+log "upload -> $REPO_ID ..."
+if "$PY" "$HERE/ms_upload.py" --repo-id "$REPO_ID" --staging "$STAGING" \
+      --station "$STATION" --date "$DATE" ${MS_TOKEN_FROM:+--token-from "$MS_TOKEN_FROM"}; then
   UPLOAD=verified
 else
   UPLOAD=failed
 fi
 log "upload=$UPLOAD"
 
-# ---------- record idle+upload into the manifest (also the morning brief) ----------
-MANIFEST="$REPO/manifest/$DATE/$STATION.json"
-python3 - "$MANIFEST" "$IDLE" "$UPLOAD" "$BW_JSON" <<'PY' || true
-import json, sys, os
-path, idle, up, bw = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
-m = json.load(open(path, encoding="utf-8"))
-m["idle"] = (idle == "true"); m["upload"] = up
-try:
-    if bw and os.path.exists(bw):
-        m["bandwidth"] = json.load(open(bw, encoding="utf-8"))   # fleet verdict -> morning brief
-except Exception:
-    pass
-json.dump(m, open(path, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
-PY
-rm -f "$BW_JSON" 2>/dev/null || true
-# archive the finalized manifest locally too (tiny, plain json — the morning brief)
-mkdir -p "$ARCHIVE/manifest/$DATE"
-cp -f "$MANIFEST" "$ARCHIVE/manifest/$DATE/$STATION.json" 2>/dev/null || true
-
 # ---------- D. purge — ONLY when verified ----------
 if [ "$UPLOAD" = verified ]; then
-  log "verified -> purging tonight's raw recordings + LFS blob cache (keeping text + manifest)"
-  # 1) tonight's session dirs (video + csv) across all anchors; keep anchor-level meta.json
   before=$(du -sk "$DATA_DIR" 2>/dev/null | awk '{print int($1/1024)}')
-  find "$DATA_DIR" -maxdepth 2 -type d -name "${DATE}_*" -exec rm -rf {} + 2>/dev/null || true
-  # 2) reclaim the clone's local copies of the (now verified-on-remote) shards:
-  #    working-tree tar files + the LFS blob cache. git-lfs prune keeps HEAD-referenced blobs,
-  #    so we clear the object cache directly, then restore tiny pointers to keep the tree clean.
-  lfs_before=$(du -sk "$REPO/.git/lfs" 2>/dev/null | awk '{print int($1/1024)}')
-  rm -f "$REPO/video/$DATE/$STATION/"*.tar 2>/dev/null || true
-  rm -rf "$REPO/.git/lfs/objects/"* 2>/dev/null || true
-  ( cd "$REPO" && GIT_LFS_SKIP_SMUDGE=1 git checkout -q -- "video/$DATE/$STATION" 2>/dev/null || true )
+  rm -rf "$DATA_DIR/$DATE" "$STAGING"
   after=$(du -sk "$DATA_DIR" 2>/dev/null | awk '{print int($1/1024)}')
-  lfs_after=$(du -sk "$REPO/.git/lfs" 2>/dev/null | awk '{print int($1/1024)}')
-  log "purge done (data/ ${before}MB->${after}MB, .git/lfs ${lfs_before}MB->${lfs_after}MB)"
+  log "verified -> purged data/$DATE + staging (data/ ${before}MB->${after}MB); kept archive/ text+manifest"
 else
-  log "NOT verified -> retaining ALL local data for retry"
+  log "NOT verified -> retaining ALL local data + staging for retry"
 fi
 
 # ---------- E. disk guard + final status line (morning brief) ----------
