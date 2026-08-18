@@ -63,11 +63,12 @@ ffmpeg -version   # must exist (needs the flac + libx264 muxers — standard bui
 ```
 
 ### 2.2 Get the project
-Clone **only** the `feat/v2` branch, shallow (latest commit, no other branches/history — much smaller):
+Clone **only** the `feat/v2` branch, shallow (latest commit, no other branches/history — much smaller).
+Use the **HTTPS** URL — the repo is public, so no SSH key/setup is needed:
 ```bash
 cd ~
 git clone --branch feat/v2 --single-branch --depth 1 \
-  git@github.com:wangruosi/DouyinBarrage.git
+  https://github.com/wangruosi/DouyinBarrage.git
 cd DouyinBarrage
 git branch --show-current            # -> feat/v2  (already on it — no checkout needed)
 ls fleet/   # -> nightly.sh postrun.sh pack.py ms_upload.py transcribe.py run.sh station.env PROTOCOL.md
@@ -252,7 +253,7 @@ by hand unless the PI confirms that night is already safely on ModelScope.
 
 ```bash
 # setup (once)
-git clone git@github.com:wangruosi/DouyinBarrage.git && cd DouyinBarrage && git checkout feat/v2
+git clone --branch feat/v2 --single-branch --depth 1 https://github.com/wangruosi/DouyinBarrage.git && cd DouyinBarrage
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 echo 'export MODELSCOPE_API_TOKEN=<token>' >> ~/.bashrc && source ~/.bashrc
 # ... cookie.txt, rooms.txt, edit fleet/station.env (STATION, START_AT, MINUTES, UPLOAD_DELAY) ...
