@@ -19,7 +19,9 @@ import argparse, hashlib, io, json, os, sys, tarfile, time
 from pathlib import Path
 
 VIDEO_EXT = {".mp4", ".ts", ".flv"}
-# text/sidecar files that travel in the text bundle (everything that is not bulky video)
+AUDIO_EXT = {".opus", ".m4a", ".ogg", ".aac"}   # compact ASR audio -> its own upload artifact
+SKIP_EXT = {".wav"}                              # transient 16k wav (ASR scratch) — never uploaded
+# text/sidecar files that travel in the text bundle (everything that is not bulky video/audio)
 TEXT_SUFFIXES = (".csv", ".json")
 DB_SUFFIXES = (".db", ".db-wal", ".db-shm")
 
@@ -61,24 +63,31 @@ def discover(data_dir, date, after=0):
         else:  # e.g. a re-open dir without meta; key by the dir name
             room_id, live_id, name = anchor_dir.name, "", anchor_dir.name
 
-        video_files, text_files, video_bytes = [], [], 0
+        video_files, audio_files, text_files, video_bytes, audio_bytes = [], [], [], 0, 0
         for f in sorted(anchor_dir.rglob("*")):
             if f.is_dir():
                 continue
-            if f.suffix.lower() in VIDEO_EXT:
+            suf = f.suffix.lower()
+            if suf in SKIP_EXT:
+                continue
+            if suf in VIDEO_EXT:
                 video_files.append(f); video_bytes += f.stat().st_size
+            elif suf in AUDIO_EXT:
+                audio_files.append(f); audio_bytes += f.stat().st_size
             else:  # csv, json, db, wal, shm, logs/* -> text bundle
                 text_files.append(f)
-        if not video_files and not text_files:
+        if not video_files and not audio_files and not text_files:
             continue
         chat_rows = csv_rows(anchor_dir / "chat.csv")
+        transcript_rows = csv_rows(anchor_dir / "transcript.csv")
 
         outcome = "recorded" if video_files and chat_rows else \
                   ("error" if not video_files and not chat_rows else "partial")
         rooms.append(dict(room_id=room_id, live_id=live_id, name=name,
                           anchor_dir=anchor_dir, sessions=[anchor_dir],
-                          video_files=video_files, text_files=text_files,
-                          video_bytes=video_bytes, chat_rows=chat_rows,
+                          video_files=video_files, audio_files=audio_files, text_files=text_files,
+                          video_bytes=video_bytes, audio_bytes=audio_bytes,
+                          chat_rows=chat_rows, transcript_rows=transcript_rows,
                           outcome=outcome))
     return rooms
 
@@ -122,9 +131,10 @@ def main():
     st, date = args.station, args.date
     out = Path(args.out_dir)
     vdir = out / "video" / date / st
+    adir = out / "audio" / date
     tdir = out / "text" / date
     mdir = out / "manifest" / date
-    for d in (vdir, tdir, mdir):
+    for d in (vdir, adir, tdir, mdir):
         d.mkdir(parents=True, exist_ok=True)
 
     rooms = discover(args.data_dir, date, args.after)
@@ -162,6 +172,19 @@ def main():
                     sha256=sha256_file(text_path))
     print(f"[pack] text bundle: {text_path.stat().st_size/(1<<20):.1f} MB")
 
+    # ---- audio bundle (compact Opus, one tar per station; opus is already compressed) ----
+    audio_rec = None
+    if any(r["audio_files"] for r in rooms):
+        audio_name = f"{st}.tar"
+        audio_path = adir / audio_name
+        with tarfile.open(audio_path, "w") as tar:
+            for r in rooms:
+                for f in r["audio_files"]:
+                    add_to_tar(tar, f, rel_arc(r, f))
+        audio_rec = dict(file=f"{date}/{audio_name}", bytes=audio_path.stat().st_size,
+                         sha256=sha256_file(audio_path))
+        print(f"[pack] audio bundle: {audio_path.stat().st_size/(1<<20):.1f} MB")
+
     # ---- manifest / brief ----
     manifest = dict(
         station=st, date=date,
@@ -169,16 +192,22 @@ def main():
         idle=None,  # set by postrun after asserting recorder exited
         shards=shard_records,
         text_bundle=text_rec,
+        audio_bundle=audio_rec,
         rooms=[dict(room_id=r["room_id"], live_id=r["live_id"], name=r["name"],
                     shard=room_to_shard.get(r["room_id"]),
                     video_bytes=r["video_bytes"], video_files=len(r["video_files"]),
-                    chat_rows=r["chat_rows"], outcome=r["outcome"], transcribed=False)
+                    audio_bytes=r["audio_bytes"], chat_rows=r["chat_rows"],
+                    outcome=r["outcome"],
+                    transcribed=r["transcript_rows"] > 0,
+                    transcript_sentences=r["transcript_rows"])
                for r in rooms],
         summary=dict(rooms=len(rooms),
                      recorded=sum(r["outcome"] == "recorded" for r in rooms),
                      partial=sum(r["outcome"] == "partial" for r in rooms),
                      error=sum(r["outcome"] == "error" for r in rooms),
+                     transcribed=sum(r["transcript_rows"] > 0 for r in rooms),
                      video_gb=round(sum(r["video_bytes"] for r in rooms) / (1 << 30), 2),
+                     audio_mb=round(sum(r["audio_bytes"] for r in rooms) / (1 << 20), 1),
                      shards=len(shard_records)),
         upload="pending",
     )

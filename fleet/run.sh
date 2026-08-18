@@ -130,9 +130,11 @@ PY
   [ "$RC" -ne 0 ] && say "⚠ bandwidth-limited"
 fi
 
-# ---------------- stage: transcribe (Phase 2 stub) ----------------
+# ---------------- stage: transcribe (SenseVoice-Small, CPU) ----------------
 if [ -n "${WANT[transcribe]:-}" ]; then
-  say "STAGE transcribe — (Phase 2: not yet implemented)"
+  say "STAGE transcribe — SenseVoice-Small (CPU) -> transcript.csv + <seg>.16k.opus"
+  ASR_PY="$(find_ms_py)"; [ -z "$ASR_PY" ] && ASR_PY="$PY"
+  "$ASR_PY" fleet/transcribe.py "data/$DATE" --jobs "${ASR_JOBS:-1}" || say "⚠ transcribe had issues"
 fi
 
 # ---------------- stage: upload (pack + SDK upload to a test dataset) ----------------

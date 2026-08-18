@@ -63,19 +63,37 @@ json.dump(stats, open(out, "w", encoding="utf-8"), ensure_ascii=False)
 PYEOF
 ) || log "WARN align/check had issues (non-fatal)"
 
+# ---------- A3. transcribe (SenseVoice-Small, CPU) -> transcript.csv + <seg>.16k.opus ----------
+# Uses $PY (the .venv-asr with funasr+torch). Non-fatal: a missing ASR env just skips transcripts.
+log "transcribe (SenseVoice-Small, CPU, jobs=${ASR_JOBS:-1}) ..."
+ASR_JSON="$(mktemp)"
+( cd "$APP_DIR" && "$PY" - "$DATA_DIR" "$DATE" "$ASR_JSON" "${ASR_JOBS:-1}" <<'PYEOF'
+import sys, os, json
+sys.path.insert(0, os.getcwd()); sys.path.insert(0, os.path.join(os.getcwd(), "fleet"))
+import align, transcribe
+data, date, out, jobs = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4])
+sessions = align.discover_sessions(f"{data}/{date}")
+stats = transcribe.transcribe_all(sessions, jobs=jobs) if sessions else {}
+stats.pop("rooms", None)                      # keep the manifest block compact
+json.dump(stats, open(out, "w", encoding="utf-8"), ensure_ascii=False)
+print(f"[transcribe] {stats.get('transcribed',0)} rooms, {stats.get('sentences',0)} sentences, "
+      f"{stats.get('audio_hours',0)}h @ {stats.get('mean_rtf')}x")
+PYEOF
+) || log "WARN transcribe had issues (non-fatal)"
+
 # ---------- B. pack tonight's sessions into a plain staging tree ----------
 log "pack -> $STAGING ..."
 rm -rf "$STAGING"
 if ! python3 "$HERE/pack.py" --station "$STATION" --date "$DATE" \
       --data-dir "$DATA_DIR" --out-dir "$STAGING" --shard-gb "$SHARD_GB"; then
-  log "pack FAILED — aborting (nothing purged)"; rm -f "$CHECK_JSON"; exit 1
+  log "pack FAILED — aborting (nothing purged)"; rm -f "$CHECK_JSON" "$ASR_JSON"; exit 1
 fi
 
 # ---------- B1. fold idle + bandwidth into the staging manifest (uploaded with the data) ----------
 MANIFEST="$STAGING/manifest/$DATE/$STATION.json"
-python3 - "$MANIFEST" "$IDLE" "$CHECK_JSON" <<'PYEOF' || true
+python3 - "$MANIFEST" "$IDLE" "$CHECK_JSON" "$ASR_JSON" <<'PYEOF' || true
 import json, sys, os
-p, idle, cj = sys.argv[1], sys.argv[2], sys.argv[3]
+p, idle, cj, aj = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
 m = json.load(open(p, encoding="utf-8")); m["idle"] = (idle == "true")
 try:
     if cj and os.path.exists(cj):
@@ -83,9 +101,12 @@ try:
         m["bandwidth"] = chk.get("bandwidth")
         m["completeness"] = chk.get("completeness")
 except Exception: pass
+try:
+    if aj and os.path.exists(aj): m["transcription"] = json.load(open(aj, encoding="utf-8"))
+except Exception: pass
 json.dump(m, open(p, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
 PYEOF
-rm -f "$CHECK_JSON"
+rm -f "$CHECK_JSON" "$ASR_JSON"
 
 # ---------- B2. archive text bundle + manifest locally (kept forever) ----------
 mkdir -p "$ARCHIVE/text/$DATE" "$ARCHIVE/manifest/$DATE"

@@ -67,6 +67,34 @@ def data_to_video(T, timing):
     return None
 
 
+def wall_index(timing):
+    """Build {segment_stem: sorted [(video_pts_s, wall_epoch)]} for video->wall lookups.
+    (timing rows from load_timing() are already zero-based per segment.)"""
+    idx = {}
+    for w, s, p in timing:
+        idx.setdefault(s, []).append((p, w))
+    for s in idx:
+        idx[s].sort()
+    return idx
+
+
+def video_to_wall(idx, stem, pts):
+    """Inverse of data_to_video: (segment stem, zero-based video pts_s) -> wall epoch.
+    Interpolates within the segment; extrapolates at ~real time past the sampled ends
+    (used to place transcript sentences, whose audio comes from that segment)."""
+    rows = idx.get(stem)
+    if not rows:
+        return None
+    if pts <= rows[0][0]:
+        return rows[0][1] - (rows[0][0] - pts)          # before first sample: 1:1 back-off
+    for (p0, w0), (p1, w1) in zip(rows, rows[1:]):
+        if p0 <= pts <= p1:
+            frac = (pts - p0) / (p1 - p0) if p1 > p0 else 0.0
+            return w0 + frac * (w1 - w0)
+    pl, wl = rows[-1]
+    return wl + (pts - pl)                              # past last sample: 1:1 forward
+
+
 def parse_time(s):
     s = s.strip()
     for fmt in ('%Y-%m-%d %H:%M:%S.%f', '%Y-%m-%d %H:%M:%S'):
