@@ -15,7 +15,7 @@ Usage:
     python fleet/pack.py --station st01 --date 20260727 --after 1920 \
         --data-dir data --out-dir /path/to/douyin
 """
-import argparse, hashlib, io, json, os, shutil, sys, tarfile, time
+import argparse, hashlib, io, json, os, sys, tarfile, time
 from pathlib import Path
 
 VIDEO_EXT = {".mp4", ".ts", ".flv"}
@@ -131,7 +131,7 @@ def main():
     st, date = args.station, args.date
     out = Path(args.out_dir)
     vdir = out / "video" / date / st
-    adir = out / "audio" / date / st          # per-room per-segment FLAC lives under here
+    adir = out / "audio" / date               # one FLAC tar per station lives here
     tdir = out / "text" / date
     mdir = out / "manifest" / date
     for d in (vdir, adir, tdir, mdir):
@@ -172,26 +172,25 @@ def main():
                     sha256=sha256_file(text_path))
     print(f"[pack] text bundle: {text_path.stat().st_size/(1<<20):.1f} MB")
 
-    # ---- audio: per-room per-segment FLAC files (NOT tarred) ----
-    # Layout: audio/{date}/{station}/{room_id}/{segment}.flac — mirrors the recorder's
-    # segmentation (one FLAC per video segment) and stays directly pullable later for
-    # VibeVoice re-transcription (no whole-station download/extract needed).
-    room_audio = {}            # room_id -> [ {file, bytes, sha256}, ... ]
-    audio_total = 0
-    for r in rooms:
-        recs = []
-        for f in r["audio_files"]:
-            arc = rel_arc(r, f)                    # {room_id}/{segment}.flac
-            dst = adir / arc
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(f, dst)
-            sz = dst.stat().st_size; audio_total += sz
-            recs.append(dict(file=f"{date}/{st}/{arc}", bytes=sz, sha256=sha256_file(dst)))
-        if recs:
-            room_audio[r["room_id"]] = recs
-    if room_audio:
-        print(f"[pack] audio: {sum(len(v) for v in room_audio.values())} FLAC segment(s) "
-              f"across {len(room_audio)} rooms, {audio_total/(1<<20):.1f} MB")
+    # ---- audio bundle: one FLAC tar per station ----
+    # Straightforward structure: `tar xf {station}.tar` -> {room_id}/{segment}.flac, one FLAC
+    # per video segment (mirrors the recorder's split), ready to feed VibeVoice-ASR later.
+    # Room-keyed like the video/text tars; the manifest lists each room's members.
+    audio_rec = None
+    room_audio = {}            # room_id -> [ "{room_id}/{segment}.flac", ... ]  (paths inside the tar)
+    if any(r["audio_files"] for r in rooms):
+        audio_path = adir / f"{st}.tar"
+        with tarfile.open(audio_path, "w") as tar:          # FLAC already compressed -> plain tar
+            for r in rooms:
+                members = [rel_arc(r, f) for f in r["audio_files"]]   # {room_id}/{segment}.flac
+                for f, arc in zip(r["audio_files"], members):
+                    add_to_tar(tar, f, arc)
+                if members:
+                    room_audio[r["room_id"]] = members
+        audio_rec = dict(file=f"{date}/{st}.tar", bytes=audio_path.stat().st_size,
+                         sha256=sha256_file(audio_path))
+        print(f"[pack] audio bundle: {audio_path.stat().st_size/(1<<20):.1f} MB, "
+              f"{sum(len(v) for v in room_audio.values())} FLAC segment(s)")
 
     # ---- manifest / brief ----
     manifest = dict(
@@ -200,11 +199,12 @@ def main():
         idle=None,  # set by postrun after asserting recorder exited
         shards=shard_records,
         text_bundle=text_rec,
+        audio_bundle=audio_rec,                          # one FLAC tar per station
         audio_format="flac/16k/mono",
         rooms=[dict(room_id=r["room_id"], live_id=r["live_id"], name=r["name"],
                     shard=room_to_shard.get(r["room_id"]),
                     video_bytes=r["video_bytes"], video_files=len(r["video_files"]),
-                    audio=room_audio.get(r["room_id"], []),      # per-segment FLAC files (pullable)
+                    audio=room_audio.get(r["room_id"], []),      # FLAC paths inside audio_bundle tar
                     audio_bytes=r["audio_bytes"], chat_rows=r["chat_rows"],
                     outcome=r["outcome"],
                     transcribed=r["transcript_rows"] > 0,
