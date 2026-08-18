@@ -102,13 +102,11 @@ cookie is effectively required for a real multi-room night.
 `grep -vc '^#' rooms.txt`. **Finalize BEFORE the window — don't edit while recording runs.**
 
 ### 2.6 ModelScope token (the upload credential — NO clone needed)
-v2 uploads via the SDK, so there is **no dataset clone**. Provide the token one of two ways:
+v2 uploads via the SDK, so there is **no dataset clone**. Export the (single) account token:
 ```bash
-# recommended: export it (persist in ~/.bashrc)
 echo 'export MODELSCOPE_API_TOKEN=<YOUR_TOKEN>' >> ~/.bashrc && source ~/.bashrc
 ```
-(Alternatively set `MS_TOKEN_FROM=/path/to/any/modelscope/clone` in station.env to read a token
-from an existing clone's remote URL.) **Never commit the token or paste it into tracked files.**
+**Never commit the token or paste it into tracked files.**
 
 ### 2.7 Configure this station — `fleet/station.env`
 ```bash

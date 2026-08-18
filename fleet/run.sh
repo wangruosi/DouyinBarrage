@@ -24,7 +24,7 @@ cd "$REPO"
 
 STAGES="record,check"; MINUTES=3; ROOM=""; ROOMS_N=""; DO_UPLOAD=0; PURGE=0; YES=0; CHECK_ONLY=0
 REPO_ID="${REPO_ID:-SISU_DynCogLab/douyin-test}"; STATION="${STATION:-runtest}"
-TOKEN_FROM="${MS_TOKEN_FROM:-}"; [ -z "$TOKEN_FROM" ] && [ -d "$REPO/../douyin/.git" ] && TOKEN_FROM="$REPO/../douyin"
+TOKEN_FROM=""; [ -d "$REPO/../douyin/.git" ] && TOKEN_FROM="$REPO/../douyin"   # dev convenience: read token from a sibling clone; else MODELSCOPE_API_TOKEN
 while [ $# -gt 0 ]; do case "$1" in
   --test)       shift;;                 # accepted for back-compat (no longer required)
   --stages)     STAGES="$2"; shift 2;;

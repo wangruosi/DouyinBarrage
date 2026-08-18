@@ -123,7 +123,7 @@ fi
 # ---------- C. upload via SDK (retry-429 + verify) ----------
 log "upload -> $REPO_ID ..."
 if "$PY" "$HERE/ms_upload.py" --repo-id "$REPO_ID" --staging "$STAGING" \
-      --station "$STATION" --date "$DATE" ${MS_TOKEN_FROM:+--token-from "$MS_TOKEN_FROM"}; then
+      --station "$STATION" --date "$DATE"; then    # token from MODELSCOPE_API_TOKEN env
   UPLOAD=verified
 else
   UPLOAD=failed
