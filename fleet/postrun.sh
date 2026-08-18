@@ -13,8 +13,8 @@ log() { echo "[postrun $(date '+%F %T')] $*"; }
 
 STAGING="$APP_DIR/upload_staging/$DATE"
 ARCHIVE="$APP_DIR/archive"
-# python with the modelscope SDK (for ms_upload). Inline convert/align blocks use plain python3.
-PY="${MS_PY:-$APP_DIR/.venv-asr/bin/python}"; [ -x "$PY" ] || PY=python3
+# the single project venv (recorder + funasr + modelscope); one python for every stage.
+PY="$APP_DIR/.venv/bin/python"; [ -x "$PY" ] || PY=python3
 
 # ---------- A. assert the recorder is gone ----------
 if pgrep -f "python -u main.py" >/dev/null 2>&1; then
@@ -26,7 +26,7 @@ log "idle=$IDLE"
 
 # ---------- A1. convert ts->mp4 (parallel) ----------
 log "convert ts->mp4 ..."
-python3 - "$DATA_DIR" "$DATE" <<'PYEOF' || log "WARN convert had issues (non-fatal)"
+"$PY" - "$DATA_DIR" "$DATE" <<'PYEOF' || log "WARN convert had issues (non-fatal)"
 import sys, glob, os, subprocess, concurrent.futures as cf
 data, date = sys.argv[1], sys.argv[2]
 ts = sorted(glob.glob(f"{data}/{date}/*/*.ts"))
@@ -53,7 +53,7 @@ PYEOF
 # then prints both verdicts and returns {bandwidth, completeness} for the manifest.
 log "align + thorough check ..."
 CHECK_JSON="$(mktemp)"
-( cd "$APP_DIR" && python3 - "$DATA_DIR" "$DATE" "$CHECK_JSON" <<'PYEOF'
+( cd "$APP_DIR" && "$PY" - "$DATA_DIR" "$DATE" "$CHECK_JSON" <<'PYEOF'
 import sys, glob, os, json
 sys.path.insert(0, os.getcwd()); import align
 data, date, out = sys.argv[1], sys.argv[2], sys.argv[3]
@@ -64,7 +64,7 @@ PYEOF
 ) || log "WARN align/check had issues (non-fatal)"
 
 # ---------- A3. transcribe (SenseVoice-Small, CPU) -> transcript.csv + <seg>.16k.flac ----------
-# Uses $PY (the .venv-asr with funasr+torch). Non-fatal: a missing ASR env just skips transcripts.
+# Uses $PY (the project .venv with funasr+torch). Non-fatal: a missing ASR env just skips transcripts.
 log "transcribe (SenseVoice-Small, CPU, jobs=${ASR_JOBS:-1}) ..."
 ASR_JSON="$(mktemp)"
 ( cd "$APP_DIR" && "$PY" - "$DATA_DIR" "$DATE" "$ASR_JSON" "${ASR_JOBS:-1}" <<'PYEOF'
@@ -84,14 +84,14 @@ PYEOF
 # ---------- B. pack tonight's sessions into a plain staging tree ----------
 log "pack -> $STAGING ..."
 rm -rf "$STAGING"
-if ! python3 "$HERE/pack.py" --station "$STATION" --date "$DATE" \
+if ! "$PY" "$HERE/pack.py" --station "$STATION" --date "$DATE" \
       --data-dir "$DATA_DIR" --out-dir "$STAGING" --shard-gb "$SHARD_GB"; then
   log "pack FAILED — aborting (nothing purged)"; rm -f "$CHECK_JSON" "$ASR_JSON"; exit 1
 fi
 
 # ---------- B1. fold idle + bandwidth into the staging manifest (uploaded with the data) ----------
 MANIFEST="$STAGING/manifest/$DATE/$STATION.json"
-python3 - "$MANIFEST" "$IDLE" "$CHECK_JSON" "$ASR_JSON" <<'PYEOF' || true
+"$PY" - "$MANIFEST" "$IDLE" "$CHECK_JSON" "$ASR_JSON" <<'PYEOF' || true
 import json, sys, os
 p, idle, cj, aj = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
 m = json.load(open(p, encoding="utf-8")); m["idle"] = (idle == "true")

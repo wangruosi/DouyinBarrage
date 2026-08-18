@@ -54,8 +54,6 @@ WANT[record]=1
 [ "$DO_UPLOAD" -eq 1 ] && WANT[upload]=1
 
 say() { echo "[run $(date '+%T')] $*"; }
-find_ms_py() { for p in .venv-asr/bin/python ../DouyinBarrage/.venv-asr/bin/python python3; do
-  "$p" -c "import modelscope" >/dev/null 2>&1 && { echo "$p"; return; }; done; }
 
 # ---------------- pre-flight ----------------
 pass=0; fail=0
@@ -91,8 +89,10 @@ NROOMS=$( [ -n "$ROOM" ] && echo 1 || echo "${ROOMS_N:-$(grep -vc '^#' rooms.txt
 if [ -f cookie.txt ] && grep -q 'sessionid=' cookie.txt; then ok "cookie.txt (sessionid — authenticated)"
 elif [ "${NROOMS:-0}" -gt 3 ]; then warn "no logged-in cookie + ${NROOMS} rooms — Douyin throttles guest ttwid; many may fail"
 else ok "no logged-in cookie (guest — OK for a small test)"; fi
+if [ -n "${WANT[upload]:-}${WANT[transcribe]:-}" ]; then
+  "$PY" -c "import funasr, modelscope" >/dev/null 2>&1 && ok "ASR+SDK deps present ($PY)" || bad "missing funasr/modelscope (pip install -r requirements.txt)"
+fi
 if [ -n "${WANT[upload]:-}" ]; then
-  MS_PY="$(find_ms_py)"; [ -n "$MS_PY" ] && ok "modelscope SDK ($MS_PY)" || bad "no python with modelscope (pip install modelscope)"
   { [ -n "$TOKEN_FROM" ] || [ -n "${MODELSCOPE_API_TOKEN:-}" ]; } && ok "ModelScope token available" || bad "no token (--token-from / MODELSCOPE_API_TOKEN)"
 fi
 [ "$fail" -gt 0 ] && { echo "--- PRE-FLIGHT FAILED ($fail) ---"; exit 1; }
@@ -133,16 +133,15 @@ fi
 # ---------------- stage: transcribe (SenseVoice-Small, CPU) ----------------
 if [ -n "${WANT[transcribe]:-}" ]; then
   say "STAGE transcribe — SenseVoice-Small (CPU) -> transcript.csv + <seg>.16k.flac"
-  ASR_PY="$(find_ms_py)"; [ -z "$ASR_PY" ] && ASR_PY="$PY"
-  "$ASR_PY" fleet/transcribe.py "data/$DATE" --jobs "${ASR_JOBS:-1}" || say "⚠ transcribe had issues"
+  "$PY" fleet/transcribe.py "data/$DATE" --jobs "${ASR_JOBS:-1}" || say "⚠ transcribe had issues"
 fi
 
 # ---------------- stage: upload (pack + SDK upload to a test dataset) ----------------
 if [ -n "${WANT[upload]:-}" ]; then
   say "STAGE upload — pack + SDK upload -> $REPO_ID (station=$STATION)"
-  MS_PY="${MS_PY:-$(find_ms_py)}"; STAGING="/tmp/run_staging.$$"; rm -rf "$STAGING"
-  if python3 fleet/pack.py --station "$STATION" --date "$DATE" --data-dir data --out-dir "$STAGING" --shard-gb 7; then
-    if "$MS_PY" fleet/ms_upload.py --repo-id "$REPO_ID" --staging "$STAGING" --station "$STATION" \
+  STAGING="/tmp/run_staging.$$"; rm -rf "$STAGING"
+  if "$PY" fleet/pack.py --station "$STATION" --date "$DATE" --data-dir data --out-dir "$STAGING" --shard-gb 7; then
+    if "$PY" fleet/ms_upload.py --repo-id "$REPO_ID" --staging "$STAGING" --station "$STATION" \
          --date "$DATE" ${TOKEN_FROM:+--token-from "$TOKEN_FROM"}; then
       say "✓ upload VERIFIED -> $REPO_ID"
     else say "✗ upload FAILED"; RC=1; PURGE=0; fi

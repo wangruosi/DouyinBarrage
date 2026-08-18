@@ -72,20 +72,14 @@ git branch --show-current            # -> feat/v2
 ls fleet/   # -> nightly.sh postrun.sh pack.py ms_upload.py transcribe.py run.sh station.env PROTOCOL.md
 ```
 
-### 2.3 Python environments (two venvs)
+### 2.3 Python environment (one venv)
 ```bash
-# a) recorder venv (websocket/protobuf/ffmpeg glue)
 python3 -m venv .venv
-.venv/bin/pip install -r requirements.txt
-
-# b) ASR venv (SenseVoice transcription + ModelScope SDK upload) — CPU only
-python3 -m venv .venv-asr
-.venv-asr/bin/pip install funasr modelscope
-.venv-asr/bin/pip install torch torchaudio --index-url https://download.pytorch.org/whl/cpu
+.venv/bin/pip install -r requirements.txt   # recorder + SenseVoice (FunASR) + ModelScope SDK (CPU torch)
 ```
 The first nightly run downloads the SenseVoice-Small model (~900 MB) + VAD into
-`~/.cache/modelscope` once, then reuses it. (Both venvs are auto-detected by the scripts;
-you never need to `activate` them manually.)
+`~/.cache/modelscope` once, then reuses it. (The scripts call `.venv/bin/python` directly —
+you never need to `activate` it.)
 
 ### 2.4 Douyin cookie (recommended)
 ```bash
@@ -207,7 +201,7 @@ tail -n 30 logs/nightly-$Y.log                 # d) run log
 | `node: command not found` / `DEVICE_BLOCKED` | Node missing/too old | install Node ≥18; re-run |
 | `ffmpeg: command not found` | ffmpeg not installed | `sudo apt install ffmpeg` |
 | upload `failed` / `no token` | token missing/expired/no write access | verify `MODELSCOPE_API_TOKEN`; ask PI |
-| transcribe skipped / `No module named funasr` | ASR venv not set up | redo §2.3 (`.venv-asr` + torch/torchaudio) |
+| transcribe skipped / `No module named funasr` | venv not fully set up | redo §2.3 (`.venv` from requirements.txt) |
 | most rooms `error`, 0 chat | cookie expired / guest throttle | refresh cookie (§2.4) |
 | `pack … no sessions` | nothing recorded (all offline / window missed) | confirm rooms.txt + that streams were live |
 | upload very slow (hours) | ModelScope throttling (normal) | let it finish; not an error |
@@ -256,9 +250,7 @@ by hand unless the PI confirms that night is already safely on ModelScope.
 ```bash
 # setup (once)
 git clone git@github.com:wangruosi/DouyinBarrage.git && cd DouyinBarrage && git checkout feat/v2
-python3 -m venv .venv     && .venv/bin/pip install -r requirements.txt
-python3 -m venv .venv-asr && .venv-asr/bin/pip install funasr modelscope && \
-  .venv-asr/bin/pip install torch torchaudio --index-url https://download.pytorch.org/whl/cpu
+python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 echo 'export MODELSCOPE_API_TOKEN=<token>' >> ~/.bashrc && source ~/.bashrc
 # ... cookie.txt, rooms.txt, edit fleet/station.env (STATION, START_AT, MINUTES, UPLOAD_DELAY) ...
 bash fleet/run.sh --rooms 3 --minutes 2 --stages record,check,transcribe --upload \
