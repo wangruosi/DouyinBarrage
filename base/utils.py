@@ -400,9 +400,12 @@ def get_user_id(user):
     return s if s else str(user.id)
 
 
-def get_anchor_dir(output_dir: str, anchor_name: str, live_id: str) -> str:
-    """获取主播输出目录路径。"""
+def get_anchor_dir(output_dir: str, anchor_name: str, live_id: str, date: str = None) -> str:
+    """主播输出目录。v2 布局：date-at-root -> output_dir/{date}/{anchor}。
+    未传 date 时回退到旧布局 output_dir/{anchor}（向后兼容）。"""
     dir_name = sanitize_dir_name(anchor_name) or live_id
+    if date:
+        return os.path.join(output_dir, date, dir_name)
     return os.path.join(output_dir, dir_name)
 
 

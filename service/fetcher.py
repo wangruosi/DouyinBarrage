@@ -1022,7 +1022,9 @@ class DouyinBarrage:
         anchor_name = self.anchor_name
 
         output_dir = self.config.get('output_dir', 'data')
-        room_dir = get_anchor_dir(output_dir, anchor_name, self.live_id)
+        # v2 layout: meta.json/cover/avatar live in data/{YYYYMMDD}/{anchor}/ with the session
+        room_dir = get_anchor_dir(output_dir, anchor_name, self.live_id,
+                                  datetime.now().strftime('%Y%m%d'))
         meta_file = os.path.join(room_dir, 'meta.json')
 
         if os.path.exists(meta_file):

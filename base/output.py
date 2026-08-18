@@ -395,8 +395,13 @@ class DataRecorder:
         now = datetime.now()
         self._ts = now.strftime('%Y%m%d_%H%M')
 
-        self._live_dir = get_anchor_dir(self._base_dir, self._anchor_name, self.live_id)
-        self._dir = os.path.join(self._live_dir, self._ts)
+        # v2 layout: data/{YYYYMMDD}/{anchor}/  (date/session at root, room inside)
+        self._dir = get_anchor_dir(self._base_dir, self._anchor_name, self.live_id,
+                                   now.strftime('%Y%m%d'))
+        # same-day re-open of this room (wait-mode) must not clobber the first session
+        if os.path.exists(os.path.join(self._dir, 'chat.csv')):
+            self._dir = f"{self._dir}_{now.strftime('%H%M')}"
+        self._live_dir = self._dir
         os.makedirs(self._dir, exist_ok=True)
 
         if 'sqlite' in self._fmts:
