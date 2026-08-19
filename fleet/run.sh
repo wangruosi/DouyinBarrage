@@ -8,11 +8,11 @@
 #
 # Usage:
 #   fleet/run.sh --rooms 5                        # record 5 rooms(3m) + check       (no upload)
-#   fleet/run.sh --rooms 5 --upload               # + pack & upload to douyin-test
+#   fleet/run.sh --rooms 5 --upload               # + pack & upload to douyin-dataset
 #   fleet/run.sh --room <id> --minutes 5 --upload # single room, 5 min, upload
 #   fleet/run.sh --stages 2,3,5 --rooms 3         # explicit stages (5=upload)
 #   fleet/run.sh --upload --purge                 # delete local recordings after a verified upload
-#   fleet/run.sh --repo-id SISU_DynCogLab/douyin  # upload to a different dataset
+#   fleet/run.sh --repo-id OWNER/other-dataset    # override the upload target dataset
 #   fleet/run.sh --check-only                     # pre-flight checks only
 #
 # stages: 2=record  3=check  4=transcribe(stub)  5=upload      (record always included)
@@ -23,7 +23,7 @@ REPO="$(dirname "$HERE")"
 cd "$REPO"
 
 STAGES="record,check"; MINUTES=3; ROOM=""; ROOMS_N=""; DO_UPLOAD=0; PURGE=0; YES=0; CHECK_ONLY=0
-REPO_ID="${REPO_ID:-SISU_DynCogLab/douyin-test}"; STATION="${STATION:-runtest}"
+REPO_ID="${REPO_ID:-SISU_DynCogLab/douyin-dataset}"; STATION="${STATION:-runtest}"
 TOKEN_FROM=""; [ -d "$REPO/../douyin/.git" ] && TOKEN_FROM="$REPO/../douyin"   # dev convenience: read token from a sibling clone; else MODELSCOPE_API_TOKEN
 while [ $# -gt 0 ]; do case "$1" in
   --test)       shift;;                 # accepted for back-compat (no longer required)

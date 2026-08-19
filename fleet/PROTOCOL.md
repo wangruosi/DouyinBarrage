@@ -46,7 +46,7 @@ can upload to the same dataset concurrently without conflicts (each writes only 
 **Software** (installed once, §2.1): Python 3, ffmpeg, Node 18+, git.
 
 **Accounts / secrets (get from the PI before starting):**
-- A **ModelScope access token** with **write** access to `SISU_DynCogLab/douyin`.
+- A **ModelScope access token** with **write** access to `SISU_DynCogLab/douyin-dataset`.
 - A **Douyin cookie** (recommended — needed for multi-room runs; guest mode is throttled).
 - The **room list** (`rooms.txt`), if not already provided.
 
@@ -131,17 +131,18 @@ record:
 
 ## 3. Acceptance test (do this once, before scheduling)
 
-Prove the whole pipeline end-to-end on a short sample, **against the test dataset** so you don't
-touch production. Run during evening hours when rooms are live:
+Prove the whole pipeline end-to-end on a short sample. It uploads a tiny test night to the
+dataset under station `st01` — you can delete that `…/st01` path from the dataset afterward (or
+use a throwaway `--station acctest` to keep it separate). Run during evening hours when rooms are live:
 ```bash
 cd ~/DouyinBarrage
 bash fleet/run.sh --rooms 3 --minutes 2 \
      --stages record,check,transcribe --upload \
-     --repo-id SISU_DynCogLab/douyin-test --station st01
+     --repo-id SISU_DynCogLab/douyin-dataset --station st01
 ```
 **Expected:** `record → recorded N session(s) → check (FLEET SUMMARY + COMPLETENESS) →
 transcribe (… @ ~35x) → pack → upload VERIFIED → OK`. Then confirm on the site:
-`https://modelscope.cn/datasets/SISU_DynCogLab/douyin-test/files` → you should see
+`https://modelscope.cn/datasets/SISU_DynCogLab/douyin-dataset/files` → you should see
 `video/<today>/st01/…`, `audio/<today>/st01.tar`, `text/<today>/st01.tar.gz`,
 `manifest/<today>/st01.json`.
 
@@ -262,7 +263,7 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 echo 'export MODELSCOPE_API_TOKEN=<token>' >> ~/.bashrc && source ~/.bashrc
 # ... cookie.txt, rooms.txt, edit fleet/station.env (STATION, START_AT, MINUTES, UPLOAD_DELAY) ...
 bash fleet/run.sh --rooms 3 --minutes 2 --stages record,check,transcribe --upload \
-     --repo-id SISU_DynCogLab/douyin-test --station st01        # acceptance test
+     --repo-id SISU_DynCogLab/douyin-dataset --station st01        # acceptance test
 
 # run a night (manual; launch before START_AT)
 nohup fleet/nightly.sh > runs/nightly_$(date +%Y%m%d).out 2>&1 &

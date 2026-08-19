@@ -6,7 +6,7 @@ manifest/DATE/STATION.json); we upload that whole tree in ONE commit. The server
 commits with a lock; on '429 commit lock busy' we retry with backoff. Then verify files landed.
 
 Usage:
-  ms_upload.py --repo-id SISU_DynCogLab/douyin --staging <dir> --station st01 --date 20260818 \
+  ms_upload.py --repo-id SISU_DynCogLab/douyin-dataset --staging <dir> --station st01 --date 20260818 \
                [--token T | --token-from /path/to/any/clone] [--retries 8]
 """
 import argparse, os, re, subprocess, sys, time, random

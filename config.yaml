@@ -13,14 +13,14 @@ output:
   lucky_bag: true             # 福袋口令
   gift: true                  # 礼物（含抖币计算）
   like: true                  # 点赞
-  member: false               # 进场
+  member: true                # 进场
   social: true                # 关注/分享
-  rank: false                 # 排行榜
+  rank: true                  # 排行榜
   stats: true                 # 实时统计（在线人数等）
-  fansclub: false             # 粉丝团
-  emoji: false                # 表情包
-  room: false                 # 直播间公告
-  roomstats: false            # 直播统计（累计观看等）
+  fansclub: true              # 粉丝团
+  emoji: true                 # 表情包
+  room: true                  # 直播间公告
+  roomstats: true             # 直播统计（累计观看等）
   control: true               # 直播状态（开始/暂停/结束）
 
 # ==================== 弹幕输出 ====================
