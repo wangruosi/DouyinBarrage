@@ -54,8 +54,25 @@ for attempt in range(a.retries):
         print(f"[upload] FAILED: {type(e).__name__}: {msg[:200]}"); sys.exit(1)
 print(f"[upload] committed in {time.time()-t0:.0f}s; verifying ...", flush=True)
 
-fs = api.get_dataset_files(repo_id=a.repo_id, revision="master")
-remote = set(f if isinstance(f,str) else (f.get('Path') or f.get('path')) for f in fs)
+# List only the {type}/{date} subtrees we just uploaded, PAGINATED. get_dataset_files defaults to
+# page_size=100 / page_number=1, so a naive single call silently misses files once the dataset
+# grows past 100 -> false "VERIFY FAILED". Scope by root_path (small subtrees) and page to the end.
+prefixes = sorted({"/".join(p.split("/")[:2]) for p in expect})   # video/DATE, audio/DATE, text/DATE, manifest/DATE
+remote = set()
+for pref in prefixes:
+    page = 1
+    while True:
+        fs = api.get_dataset_files(repo_id=a.repo_id, revision="master", root_path=pref,
+                                   recursive=True, page_size=100, page_number=page)
+        if not fs:
+            break
+        for f in fs:
+            p = f if isinstance(f, str) else (f.get('Path') or f.get('path'))
+            if p:
+                remote.add(p)
+        if len(fs) < 100:
+            break
+        page += 1
 missing = [p for p in expect if p not in remote]
 if missing:
     print(f"[upload] VERIFY FAILED — {len(missing)} missing:"); [print("   ", m) for m in missing[:10]]; sys.exit(1)
