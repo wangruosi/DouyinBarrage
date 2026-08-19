@@ -49,11 +49,14 @@ def _seg_spans(session_dir, base_stem):
     Returns [(stem, start_out, end_out)] sorted; single-file recording -> [(base_stem, 0, inf)]."""
     if _media_exists(session_dir, base_stem):          # non-segmented: the base IS the file
         return [(base_stem, 0.0, float('inf'))]
-    segs = []
-    for ext in ('.mp4', '.ts', '.flv'):                # segmented: {base}_NNN.*
-        segs = sorted(glob.glob(os.path.join(session_dir, f'{base_stem}_[0-9][0-9][0-9]{ext}')))
-        if segs:
-            break
+    # Collect {base}_NNN across ALL extensions, keyed by stem, preferring .mp4 over .ts/.flv when a
+    # stem exists in both — a partial ts->mp4 conversion can leave a MIXED set (_000.mp4 converted,
+    # _001.ts not). Picking a single extension would drop the others and mis-map later rows.
+    by_stem = {}                                       # stem -> path
+    for ext in ('.mp4', '.ts', '.flv'):
+        for p in glob.glob(os.path.join(session_dir, f'{base_stem}_[0-9][0-9][0-9]{ext}')):
+            by_stem.setdefault(os.path.splitext(os.path.basename(p))[0], p)   # .mp4 seen first -> wins
+    segs = [by_stem[s] for s in sorted(by_stem)]       # zero-padded _NNN sorts numerically
     if not segs:
         return [(base_stem, 0.0, float('inf'))]         # nothing on disk yet — leave as-is
     spans, c = [], 0.0
