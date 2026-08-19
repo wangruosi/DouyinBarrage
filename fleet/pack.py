@@ -18,6 +18,7 @@ Usage:
         --data-dir data --out-dir <staging-dir>
 """
 import argparse, hashlib, io, json, os, sys, tarfile, time
+from collections import Counter
 from pathlib import Path
 
 VIDEO_EXT = {".mp4", ".ts", ".flv"}
@@ -85,11 +86,21 @@ def discover(data_dir, date):
         outcome = "recorded" if video_files and chat_rows else \
                   ("error" if not video_files and not chat_rows else "partial")
         rooms.append(dict(room_id=room_id, live_id=live_id, name=name,
-                          anchor_dir=anchor_dir, sessions=[anchor_dir],
+                          anchor_dir=anchor_dir, session=anchor_dir.name,
                           video_files=video_files, audio_files=audio_files, text_files=text_files,
                           video_bytes=video_bytes, audio_bytes=audio_bytes,
                           chat_rows=chat_rows, transcript_rows=transcript_rows,
                           outcome=outcome))
+    return rooms
+
+
+def assign_arc_roots(rooms):
+    """Give each session a tar-member root. Normally {room_id} (flat, unchanged layout); when a
+    room_id appears in >1 session dir (same-day rerun / wait-mode reopen), disambiguate as
+    {room_id}/{session} so the sessions never collide/overwrite. `session` (dir name) is unique."""
+    counts = Counter(r["room_id"] for r in rooms)
+    for r in rooms:
+        r["arc_root"] = r["room_id"] if counts[r["room_id"]] == 1 else f"{r['room_id']}/{r['session']}"
     return rooms
 
 
@@ -114,8 +125,9 @@ def add_to_tar(tar, file_path, arcname):
 
 
 def rel_arc(room, f):
-    """archive path inside a tar: {room_id}/{path-relative-to-anchor-dir}"""
-    return f"{room['room_id']}/{f.relative_to(room['anchor_dir'])}"
+    """archive path inside a tar: {arc_root}/{path-relative-to-anchor-dir}, where arc_root is
+    {room_id} (unique) or {room_id}/{session} for a room with multiple sessions."""
+    return f"{room['arc_root']}/{f.relative_to(room['anchor_dir'])}"
 
 
 def main():
@@ -141,6 +153,7 @@ def main():
     if not rooms:
         print(f"[pack] no sessions for date={date} in {args.data_dir}", file=sys.stderr)
         sys.exit(1)
+    assign_arc_roots(rooms)
     print(f"[pack] {len(rooms)} rooms: " +
           ", ".join(f"{r['name']}({r['outcome']},{r['video_bytes']//(1<<20)}MB)" for r in rooms))
 
@@ -155,10 +168,10 @@ def main():
             for r in b["rooms"]:
                 for f in r["video_files"]:
                     add_to_tar(tar, f, rel_arc(r, f))
-                room_to_shard[r["room_id"]] = shard_name
+                room_to_shard[r["session"]] = shard_name          # key by unique session, not room_id
         sz = shard_path.stat().st_size
         shard_records.append(dict(file=shard_name, bytes=sz, sha256=sha256_file(shard_path),
-                                  rooms=[r["room_id"] for r in b["rooms"]]))
+                                  rooms=[r["arc_root"] for r in b["rooms"]]))
         print(f"[pack] {shard_name}: {sz/(1<<30):.2f} GB, {len(b['rooms'])} rooms")
 
     # ---- text bundle ----
@@ -177,16 +190,16 @@ def main():
     # per video segment (mirrors the recorder's split), ready to feed VibeVoice-ASR later.
     # Room-keyed like the video/text tars; the manifest lists each room's members.
     audio_rec = None
-    room_audio = {}            # room_id -> [ "{room_id}/{segment}.flac", ... ]  (paths inside the tar)
+    room_audio = {}            # session -> [ "{arc_root}/{segment}.flac", ... ]  (paths inside the tar)
     if any(r["audio_files"] for r in rooms):
         audio_path = adir / f"{st}.tar"
         with tarfile.open(audio_path, "w") as tar:          # FLAC already compressed -> plain tar
             for r in rooms:
-                members = [rel_arc(r, f) for f in r["audio_files"]]   # {room_id}/{segment}.flac
+                members = [rel_arc(r, f) for f in r["audio_files"]]   # {arc_root}/{segment}.flac
                 for f, arc in zip(r["audio_files"], members):
                     add_to_tar(tar, f, arc)
                 if members:
-                    room_audio[r["room_id"]] = members
+                    room_audio[r["session"]] = members
         audio_rec = dict(file=f"{date}/{st}.tar", bytes=audio_path.stat().st_size,
                          sha256=sha256_file(audio_path))
         print(f"[pack] audio bundle: {audio_path.stat().st_size/(1<<20):.1f} MB, "
@@ -202,9 +215,10 @@ def main():
         audio_bundle=audio_rec,                          # one FLAC tar per station
         audio_format="flac/16k/mono",
         rooms=[dict(room_id=r["room_id"], live_id=r["live_id"], name=r["name"],
-                    shard=room_to_shard.get(r["room_id"]),
+                    session=r["session"],                        # dir name; disambiguates reopens
+                    shard=room_to_shard.get(r["session"]),
                     video_bytes=r["video_bytes"], video_files=len(r["video_files"]),
-                    audio=room_audio.get(r["room_id"], []),      # FLAC paths inside audio_bundle tar
+                    audio=room_audio.get(r["session"], []),      # FLAC paths inside audio_bundle tar
                     audio_bytes=r["audio_bytes"], chat_rows=r["chat_rows"],
                     outcome=r["outcome"],
                     transcribed=r["transcript_rows"] > 0,

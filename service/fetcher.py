@@ -1021,10 +1021,17 @@ class DouyinBarrage:
             info_snapshot = dict(self._room_info)
         anchor_name = self.anchor_name
 
-        output_dir = self.config.get('output_dir', 'data')
-        # v2 layout: meta.json/cover/avatar live in data/{YYYYMMDD}/{anchor}/ with the session
-        room_dir = get_anchor_dir(output_dir, anchor_name, self.live_id,
-                                  datetime.now().strftime('%Y%m%d'))
+        # meta.json/cover/avatar must land in the recorder's ACTIVE session dir — which on a
+        # same-day reopen is a suffixed dir ({anchor}_HHMM), not the base anchor dir. Writing to
+        # the base dir would leave reopen dirs meta-less, so pack.py falls back to the dir name as
+        # room_id. _save_room_info runs right after data_recorder.open(), so session_dir is set.
+        rec = self._data_recorder
+        if rec is not None and getattr(rec, '_opened', False) and rec.session_dir:
+            room_dir = rec.session_dir
+        else:
+            output_dir = self.config.get('output_dir', 'data')
+            room_dir = get_anchor_dir(output_dir, anchor_name, self.live_id,
+                                      datetime.now().strftime('%Y%m%d'))
         meta_file = os.path.join(room_dir, 'meta.json')
 
         if os.path.exists(meta_file):
