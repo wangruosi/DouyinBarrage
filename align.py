@@ -472,7 +472,7 @@ def completeness(sessions):
     if align_fail:
         print("  ⚠ ALIGNMENT FAILURES (data present, not tagged): " + ", ".join(align_fail[:8]))
     else:
-        print("  ✓ alignment: every data stream tagged to the timeline")
+        print("  ✓ alignment: all streams processed (no tagging failures)")
     print("=" * 64)
 
     return {
