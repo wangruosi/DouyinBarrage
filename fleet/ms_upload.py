@@ -69,7 +69,7 @@ for pref in prefixes:
         for f in fs:
             p = f if isinstance(f, str) else (f.get('Path') or f.get('path'))
             if p:
-                remote.add(p)
+                remote.add(p.lstrip('/'))         # normalize any leading slash (SDK-version drift)
         if len(fs) < 100:
             break
         page += 1

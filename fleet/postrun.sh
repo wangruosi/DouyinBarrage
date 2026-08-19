@@ -23,11 +23,15 @@ ARCHIVE="$APP_DIR/archive"
 PY="$APP_DIR/.venv/bin/python"; [ -x "$PY" ] || PY=python3
 
 # ---------- A. assert the recorder is gone ----------
-if pgrep -f "python -u main.py" >/dev/null 2>&1; then
-  log "WARN recorder still running — SIGINT"; pkill -INT -f "python -u main.py" || true
-  for _ in $(seq 1 30); do pgrep -f "python -u main.py" >/dev/null 2>&1 || break; sleep 2; done
+# Only THIS app's recorder: match main.py processes whose cwd is $APP_DIR, so we never signal
+# another checkout / unrelated `python -u main.py` on a shared machine.
+recorder_pids() { for p in $(pgrep -f "python -u main.py" 2>/dev/null); do
+  [ "$(readlink -f "/proc/$p/cwd" 2>/dev/null)" = "$APP_DIR" ] && printf '%s ' "$p"; done; }
+if [ -n "$(recorder_pids)" ]; then
+  log "WARN recorder still running (this app) — SIGINT"; kill -INT $(recorder_pids) 2>/dev/null || true
+  for _ in $(seq 1 30); do [ -z "$(recorder_pids)" ] && break; sleep 2; done
 fi
-pgrep -f "python -u main.py" >/dev/null 2>&1 && IDLE=false || IDLE=true
+[ -n "$(recorder_pids)" ] && IDLE=false || IDLE=true
 log "idle=$IDLE"
 
 # ---------- A1. convert ts->mp4 (parallel) ----------

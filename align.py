@@ -290,7 +290,11 @@ def summarize_session(session_dir):
             if v == 'True': gap += 1
             elif v == 'outside': out += 1
         aligned[kind] = (tot, gap, out)
-    return {'segs': seg, 'breaks': breaks, 'video': video, 'wall': wall,
+    # actual media file count: segment mode splits one base into _000/_001/... The metrics above
+    # are (correctly) computed on the CONTINUOUS out_time timeline (all rows share the base stem);
+    # only the reported file count needs the real number.
+    n_files = sum(len(_seg_spans(session_dir, os.path.splitext(sf)[0])) for sf in order)
+    return {'segs': seg, 'breaks': breaks, 'video': video, 'wall': wall, 'n_files': n_files,
             'flow': flow, 'coverage': coverage, 'main_wall': mw, 'aligned': aligned}
 
 
@@ -316,7 +320,7 @@ def report(sessions):
             nodata.append(label); continue
         stats.append((label, s))
         print(f"\n{label}")
-        print(f"  segments: {len(s['segs'])}   video {_fmt_dur(s['video'])} / wall {_fmt_dur(s['wall'])}"
+        print(f"  segments: {s.get('n_files', len(s['segs']))}   video {_fmt_dur(s['video'])} / wall {_fmt_dur(s['wall'])}"
               f"   flow {s['flow']:.2f}  cover {s['coverage']:.2f}")
         if s['breaks']:
             for dur, iso, off, kind in sorted(s['breaks'], key=lambda b: -b[0]):

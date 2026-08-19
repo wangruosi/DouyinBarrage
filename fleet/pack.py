@@ -17,7 +17,7 @@ Usage:
     python fleet/pack.py --station st01 --date 20260727 \
         --data-dir data --out-dir <staging-dir>
 """
-import argparse, hashlib, io, json, os, sys, tarfile, time
+import argparse, hashlib, io, json, os, re, sys, tarfile, time
 from collections import Counter
 from pathlib import Path
 
@@ -57,12 +57,18 @@ def discover(data_dir, date):
         return rooms
     for anchor_dir in sorted(p for p in base.iterdir() if p.is_dir()):
         meta_path = anchor_dir / "meta.json"
+        if not meta_path.exists():
+            # legacy reopen dir ({anchor}_HHMM) recorded before meta-in-session-dir: recover the
+            # room id from the sibling base dir's meta.json so it doesn't fall back to the name.
+            m = re.match(r"^(.*)_\d{4}$", anchor_dir.name)
+            if m and (base / m.group(1) / "meta.json").exists():
+                meta_path = base / m.group(1) / "meta.json"
         if meta_path.exists():
             meta = json.loads(meta_path.read_text(encoding="utf-8"))
             room_id = str(meta.get("room_id") or meta.get("live_id"))
             live_id = str(meta.get("live_id", ""))
             name = meta.get("anchor_name", anchor_dir.name)
-        else:  # e.g. a re-open dir without meta; key by the dir name
+        else:  # truly no meta anywhere; last-resort key by the dir name
             room_id, live_id, name = anchor_dir.name, "", anchor_dir.name
 
         video_files, audio_files, text_files, video_bytes, audio_bytes = [], [], [], 0, 0
