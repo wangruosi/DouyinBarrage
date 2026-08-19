@@ -71,17 +71,8 @@ fi
 # python venv, if present
 [ -f .venv/bin/activate ] && source .venv/bin/activate
 
-# recording control:
-#   default / --record  -> force-enable (pass --record; deterministic regardless of config)
-#   --no-record         -> force-disable by temporarily flipping config.yaml's record.enabled
-#                          (comment-preserving sed on the record: block, restored on exit)
-_CFG_BAK=""
-restore_cfg() { [ -n "$_CFG_BAK" ] && [ -f "$_CFG_BAK" ] && mv -f "$_CFG_BAK" config.yaml; }
-if [ "$RECORD" -eq 0 ] && [ -f config.yaml ]; then
-  _CFG_BAK="$(mktemp)"; cp config.yaml "$_CFG_BAK"
-  trap restore_cfg EXIT INT TERM
-  sed -i '/^record:/,/^[a-zA-Z]/ s/^\(  enabled:\) *true/\1 false/' config.yaml
-fi
+# recording control is passed to main.py as a flag (no config.yaml edits — a hard kill mid-run
+# could otherwise leave the tracked file modified): --record force-enables, --no-record disables.
 
 # optional scheduled start
 if [ -n "$AT" ]; then
@@ -96,6 +87,7 @@ fi
 if [ -n "$ROOM" ]; then TARGET=("$ROOM"); else TARGET=(--all); fi
 CMD=(python -u main.py "${TARGET[@]}" --log-level "$LOGLEVEL")
 [ "$RECORD" -eq 1 ] && CMD+=(--record)
+[ "$RECORD" -eq 0 ] && CMD+=(--no-record)
 [ "${#EXTRA[@]}" -gt 0 ] && CMD+=("${EXTRA[@]}")
 
 # tee output to runs/<timestamp>.log

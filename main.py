@@ -646,6 +646,8 @@ def main():
                         help='直播结束后等待重开播（默认跟随配置文件）')
     parser.add_argument('--record', action='store_true',
                         help='启用直播流录制（覆盖配置文件中的 record.enabled）')
+    parser.add_argument('--no-record', action='store_true',
+                        help='禁用直播流录制（覆盖 record.enabled，无需改动 config.yaml）')
     parser.add_argument('--all', action='store_true',
                         help='采集 rooms.txt 中全部未注释的房间（跳过交互选择）')
 
@@ -657,7 +659,10 @@ def main():
         sys.exit(1)
     live_stop = True if args.live_stop else (False if args.live_wait else None)
 
-    record = True if args.record else None
+    if args.record and args.no_record:
+        print("错误：--record 和 --no-record 不能同时使用")
+        sys.exit(1)
+    record = True if args.record else (False if args.no_record else None)
 
     # 检查 ffmpeg（启用录制时）
     if record:
