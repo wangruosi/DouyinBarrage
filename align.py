@@ -25,23 +25,74 @@ import csv, os, sys, glob, subprocess
 from datetime import datetime
 
 
+def _media_exists(session_dir, stem):
+    return any(os.path.exists(os.path.join(session_dir, stem + e)) for e in ('.mp4', '.ts', '.flv'))
+
+
+def _probe_dur(path):
+    """Media duration in seconds via ffprobe (0.0 on failure)."""
+    try:
+        out = subprocess.run(['ffprobe', '-v', 'error', '-show_entries', 'format=duration',
+                              '-of', 'csv=p=0', path], capture_output=True, text=True, timeout=30).stdout.strip()
+        return float(out) if out else 0.0
+    except Exception:
+        return 0.0
+
+
+def _seg_spans(session_dir, base_stem):
+    """Map a sidecar's base stem to the actual segment file(s) in the CONTINUOUS out_time timeline.
+
+    ffmpeg's `-f segment` writes {base}_000/{base}_001/... with -reset_timestamps (each file is
+    zero-based) while -progress out_time keeps counting continuously. So a row's out_time picks
+    which file it lands in, and (out_time - file_start) is the zero-based position inside it.
+    Boundaries come from the files' own durations (== the segment-list boundaries).
+    Returns [(stem, start_out, end_out)] sorted; single-file recording -> [(base_stem, 0, inf)]."""
+    if _media_exists(session_dir, base_stem):          # non-segmented: the base IS the file
+        return [(base_stem, 0.0, float('inf'))]
+    segs = []
+    for ext in ('.mp4', '.ts', '.flv'):                # segmented: {base}_NNN.*
+        segs = sorted(glob.glob(os.path.join(session_dir, f'{base_stem}_[0-9][0-9][0-9]{ext}')))
+        if segs:
+            break
+    if not segs:
+        return [(base_stem, 0.0, float('inf'))]         # nothing on disk yet — leave as-is
+    spans, c = [], 0.0
+    for p in segs:
+        stem = os.path.splitext(os.path.basename(p))[0]
+        d = _probe_dur(p)
+        spans.append((stem, c, c + d)); c += d
+    stem, s, _ = spans[-1]
+    spans[-1] = (stem, s, float('inf'))                 # last span open-ended (absorbs rounding)
+    return spans
+
+
 def load_timing(session_dir):
     """Return sorted list of (wall_epoch, segment_stem, seek_s).
 
-    seek_s is normalized to 0-based per segment (video_pts_s - segment's first pts),
-    because auto-convert produces a zero-based .mp4 while the raw mpegts out_time
-    carries the stream's PTS offset. So seek_s == the correct `-ss` into the .mp4.
-    """
+    Segment-aware: the sidecar records a CONTINUOUS out_time under the base filename, but with
+    `segment_time>0` the media is split into {base}_000/{base}_001/... (each zero-based). We
+    re-attribute every row to the actual segment file it falls in and re-base out_time to that
+    file's start, so seek_s is the correct 0-based `-ss` into that segment. For a single-file
+    recording this reduces to the old behavior (video_pts_s - segment's first pts)."""
     raw = []
-    t0 = {}   # stem -> min video_pts_s seen
     for f in glob.glob(os.path.join(session_dir, 'timing_*.csv')):
         with open(f, encoding='utf-8') as fp:
             for r in csv.DictReader(fp):
-                stem = os.path.splitext(r['segment_file'])[0]   # match .ts or .mp4
-                pts = float(r['video_pts_s'])
-                raw.append((float(r['wall_epoch']), stem, pts))
-                t0[stem] = min(t0.get(stem, pts), pts)
-    rows = [(w, s, round(p - t0[s], 3)) for (w, s, p) in raw]
+                base = os.path.splitext(r['segment_file'])[0]
+                raw.append((float(r['wall_epoch']), base, float(r['video_pts_s'])))
+    spans = {}                                          # base stem -> [(stem, start, end)]
+    recon, t0 = [], {}                                  # reconciled rows + per-actual-stem min pts
+    for w, base, ot in raw:
+        segs = spans.get(base)
+        if segs is None:
+            segs = spans[base] = _seg_spans(session_dir, base)
+        stem, s = segs[-1][0], segs[-1][1]
+        for st, a, b in segs:
+            if a <= ot < b:
+                stem, s = st, a; break
+        local = ot - s
+        recon.append((w, stem, local)); t0[stem] = min(t0.get(stem, local), local)
+    rows = [(w, s, round(p - t0[s], 3)) for (w, s, p) in recon]
     rows.sort()
     return rows
 
