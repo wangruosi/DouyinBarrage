@@ -8,7 +8,13 @@
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$HERE/station.env"
-DATE="${DATE:-$(date +%Y%m%d)}"
+# which night to process: --date YYYYMMDD  (for a next-morning retry) > $DATE env > today
+DATE_ARG=""
+while [ $# -gt 0 ]; do case "$1" in
+  --date) DATE_ARG="$2"; shift 2;;
+  *) echo "postrun.sh: unknown arg '$1' (use --date YYYYMMDD)" >&2; exit 2;;
+esac; done
+DATE="${DATE_ARG:-${DATE:-$(date +%Y%m%d)}}"
 log() { echo "[postrun $(date '+%F %T')] $*"; }
 
 STAGING="$APP_DIR/upload_staging/$DATE"

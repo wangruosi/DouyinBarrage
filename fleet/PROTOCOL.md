@@ -228,12 +228,16 @@ cd ~/DouyinBarrage && fleet/nightly.sh        # records the configured window no
 ```
 
 ### 7.3 Re-try a failed upload / purge
-If `upload: failed`, local data is retained. Re-run just the post-processing:
+If `upload: failed`, local data is retained. Re-run just the post-processing — **pass the night's
+date** (retries usually happen the morning after, and without `--date` it would target *today* and
+find "no sessions"):
 ```bash
-cd ~/DouyinBarrage && fleet/postrun.sh        # re-align/transcribe/pack/upload/verify; purges ONLY on VERIFIED
+cd ~/DouyinBarrage && fleet/postrun.sh --date <YYYYMMDD>   # e.g. --date $(date -d yesterday +%Y%m%d)
+# (same-day retry, before midnight, can omit --date — it defaults to today)
 ```
-If it keeps failing, check internet + token and tell the PI. **Do NOT manually delete `data/`** —
-that loses the night. (Text bundle + manifest are always archived under `archive/` regardless.)
+It re-aligns/transcribes/packs/uploads/verifies and purges **ONLY on VERIFIED**. If it keeps
+failing, check internet + token and tell the PI. **Do NOT manually delete `data/`** — that loses
+the night. (Text bundle + manifest are always archived under `archive/` regardless.)
 
 ### 7.4 Disk getting full
 Usually means uploads are failing and data is piling up. Fix the upload (§7.3). Never delete `data/`
