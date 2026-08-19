@@ -641,37 +641,3 @@ class DataRecorder:
             self._db = None
         self._opened = False
         logger.info("[数据] 记录器已关闭")
-
-    @staticmethod
-    def _recover_orphans():
-        """启动时回收上次未搬迁的孤儿 /tmp 文件。"""
-        import glob as _glob
-        for d in _glob.glob(os.path.join(tempfile.gettempdir(), 'douyin_*')):
-            if not os.path.isdir(d):
-                continue
-            db_files = [f for f in os.listdir(d) if f.endswith('.db')]
-            if not db_files:
-                continue
-            for db_name in db_files:
-                try:
-                    base = db_name.rsplit('.db', 1)[0]
-                    parts = base.rsplit('_', 2)
-                    if len(parts) >= 3:
-                        ts = f"{parts[-2]}_{parts[-1]}"
-                        anchor = '_'.join(parts[:-2])
-                        dst_dir = os.path.join('data', anchor, ts)
-                        if os.path.isdir(dst_dir):
-                            logger.info(f"[数据] 回收孤儿文件: {d} → {dst_dir}")
-                            for f in os.listdir(d):
-                                if f.endswith(('.db', '.db-shm', '.db-wal')):
-                                    try:
-                                        shutil.move(os.path.join(d, f), os.path.join(dst_dir, f))
-                                    except Exception:
-                                        pass
-                            try:
-                                shutil.rmtree(d, ignore_errors=True)
-                            except Exception:
-                                pass
-                        break
-                except Exception:
-                    continue
