@@ -145,14 +145,14 @@ fi
 # ---------------- stage: upload (pack + SDK upload to a test dataset) ----------------
 if [ -n "${WANT[upload]:-}" ]; then
   say "STAGE upload — pack + SDK upload -> $REPO_ID (station=$STATION)"
-  STAGING="/tmp/run_staging.$$"; rm -rf "$STAGING"
-  if "$PY" fleet/pack.py --station "$STATION" --date "$DATE" --session "$DOUYIN_SESSION" --data-dir data --out-dir "$STAGING" --shard-gb 7; then
+  STAGING="/tmp/run_staging.$$/$DOUYIN_SESSION"; rm -rf "/tmp/run_staging.$$"
+  if "$PY" fleet/pack.py --station "$STATION" --session "$DOUYIN_SESSION" --data-dir data --out-dir "$STAGING" --shard-gb 7; then
     if "$PY" fleet/ms_upload.py --repo-id "$REPO_ID" --staging "$STAGING" --station "$STATION" \
-         --date "$DATE" ${TOKEN_FROM:+--token-from "$TOKEN_FROM"}; then
+         --session "$DOUYIN_SESSION" ${TOKEN_FROM:+--token-from "$TOKEN_FROM"}; then
       say "✓ upload VERIFIED -> $REPO_ID"
     else say "✗ upload FAILED"; RC=1; PURGE=0; fi
   else say "✗ pack FAILED"; RC=1; PURGE=0; fi
-  rm -rf "$STAGING"
+  rm -rf "/tmp/run_staging.$$"
 fi
 
 # ---------------- retention (KEEP by default; --purge deletes after a verified upload) ----------------

@@ -29,8 +29,8 @@ echo "[nightly] preflight OK: disk_free=${FREE}GB"
 # 1) record the window (blocks until graceful stop)
 "$APP_DIR/scripts/record.sh" --at "$START_AT" --minutes "$MINUTES" --log-level INFO
 
-# 2) post-run pipeline (pack -> upload+verify -> purge -> status)
-"$HERE/postrun.sh"
+# 2) post-run pipeline for this session (pack -> upload+verify -> purge -> status)
+"$HERE/postrun.sh" --session "$DOUYIN_SESSION"
 rc=$?
 echo "[nightly] postrun exit=$rc  (0 = idle & verified)"
 exit $rc

@@ -19,8 +19,11 @@ You do **not** need to understand the internals. Follow the steps; watch the mor
        → purge local video+audio (only after verify) → keep text+manifest locally
        → print the NIGHTLY SUMMARY (rooms/minutes/gaps/flow) + status line (the "morning brief")
 ```
-Data lands in a **per-session folder** `data/<date>_<START_AT>/<room>/`; each run writes **one log
-file** `runs/nightly_<date>.log` (the whole night — `tail -f` it to monitor).
+**Everything is keyed by session** `<date>_<START_AT>` (e.g. `20260819_2000`): recordings in
+`data/<session>/<room>/`, packed to `upload_staging/<session>/`, published to
+`<type>/<session>/<station>` on the dataset. One session → one bundle (a re-run the same night is
+just another session — they never collide). Each run writes **one log file**
+`runs/nightly_<date>.log` (the whole night — `tail -f` it to monitor).
 Everything after 20:00 is automatic. Your job is **setup once**, then **check the brief each morning**.
 
 **No git clone anywhere** — upload is a direct SDK push (`fleet/ms_upload.py`), so multiple stations
@@ -145,8 +148,8 @@ bash fleet/run.sh --rooms 3 --minutes 2 \
 **Expected:** `record → recorded N session(s) → check (FLEET SUMMARY + COMPLETENESS) →
 transcribe (… @ ~35x) → pack → upload VERIFIED → OK`. Then confirm on the site:
 `https://modelscope.cn/datasets/SISU_DynCogLab/douyin-dataset/files` → you should see
-`video/<today>/st01/…`, `audio/<today>/st01.tar`, `text/<today>/st01.tar.gz`,
-`manifest/<today>/st01.json`.
+`video/<session>/st01/…`, `audio/<session>/st01.tar`, `text/<session>/st01.tar.gz`,
+`manifest/<session>/st01.json` (where `<session>` = `<today>_<HHMM>`, e.g. `20260819_2000`).
 
 If you see `VERIFIED` + those four artifact types on the site → **the station is ready.**
 (Use `--purge` to also delete the local test data; default keeps it.)
@@ -186,7 +189,7 @@ need.)
 cd ~/DouyinBarrage
 pgrep -f 'python -u main.py' | wc -l          # a) 0 = idle (nothing stuck recording)
 Y=$(date -d yesterday +%Y%m%d)
-python3 -m json.tool archive/manifest/$Y/st01.json | \
+python3 -m json.tool archive/manifest/${Y}_*/st01.json | \    # ${Y}_* = last night's session(s)
   grep -E '"idle"|"upload"|"summary"|"bandwidth"|"completeness"|"transcription"'   # b) the brief
 df -h .                                        # c) disk
 tail -n 40 runs/nightly_$Y.log                 # d) run log — ENDS with the NIGHTLY SUMMARY
@@ -252,7 +255,7 @@ pkill -f 'fleet/postrun.sh'; pkill -f 'ms_upload.py'   # only if postprocessing/
 sleep 8; pgrep -f 'python -u main.py' | wc -l  # confirm 0
 ```
 Aborting is **safe**: nothing is purged unless an upload already verified, so the recording stays
-under `data/<date>_<START_AT>/`. Resume later with `fleet/postrun.sh --date <date>` (§7.3).
+under `data/<session>/`. Resume later with `fleet/postrun.sh --session <session>` (§7.3).
 
 ### 7.2 Run a night manually (if one was missed)
 ```bash
@@ -260,24 +263,22 @@ cd ~/DouyinBarrage && fleet/nightly.sh        # records the configured window no
 ```
 
 ### 7.3 Re-try a failed upload / purge
-If `upload: failed`, local data is retained. Re-run just the post-processing — **pass the night's
-date** (retries usually happen the morning after, and without `--date` it would target *today* and
-find "no sessions"):
+If `upload: failed`, local data is retained. Re-run just the post-processing — **pass the session**
+(`ls -d data/*/` shows what's on disk; each is a `<date>_<HHMM>` session):
 ```bash
-cd ~/DouyinBarrage && fleet/postrun.sh --date <YYYYMMDD>   # e.g. --date $(date -d yesterday +%Y%m%d)
-# (same-day retry, before midnight, can omit --date — it defaults to today)
+cd ~/DouyinBarrage && fleet/postrun.sh --session <YYYYMMDD_HHMM>   # e.g. --session 20260819_2000
 ```
 It re-aligns/transcribes/packs/uploads/verifies and purges **ONLY on VERIFIED**. If it keeps
 failing, check internet + token and tell the PI. **Do NOT manually delete `data/`** — that loses
-the night. (Text bundle + manifest are always archived under `archive/` regardless.)
+the session. (Text bundle + manifest are always archived under `archive/` regardless.)
 
 **Upload-only retry (skip the re-processing).** If the earlier run already converted/aligned/
-transcribed/packed and only the *network push* failed, the packed tree is still in
-`upload_staging/<date>/`. Re-push just that — no need to redo the (slow) align/transcribe/pack:
+transcribed/packed and only the *network push* failed, the packed outbox is still in
+`upload_staging/<session>/`. Re-push just that — no need to redo the (slow) align/transcribe/pack:
 ```bash
-cd ~/DouyinBarrage && fleet/postrun.sh --date <YYYYMMDD> --upload-only
+cd ~/DouyinBarrage && fleet/postrun.sh --session <YYYYMMDD_HHMM> --upload-only
 ```
-It uploads the existing staging, verifies, and purges on success. If the staging is gone (e.g. it
+It uploads the existing outbox, verifies, and purges on success. If the outbox is gone (e.g. it
 was cleared), it errors out and tells you to re-run **without** `--upload-only` to rebuild it.
 
 ### 7.4 Disk getting full
@@ -313,7 +314,7 @@ tail -f runs/nightly_$(date +%Y%m%d).log
 
 # each morning
 pgrep -f 'python -u main.py' | wc -l                            # 0 = idle
-python3 -m json.tool archive/manifest/$(date -d yesterday +%Y%m%d)/st01.json
+python3 -m json.tool archive/manifest/$(date -d yesterday +%Y%m%d)_*/st01.json
 tail -n 40 runs/nightly_$(date -d yesterday +%Y%m%d).log        # run log
 
 # stop recorder gracefully (keeps & still uploads)   |   fully abort the job
