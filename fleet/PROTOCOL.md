@@ -17,8 +17,10 @@ You do **not** need to understand the internals. Follow the steps; watch the mor
        → pack: video shards (≤7GB) / audio tar / text+transcript bundle / manifest
        → [wait UPLOAD_DELAY] → upload to ModelScope via SDK + verify
        → purge local video+audio (only after verify) → keep text+manifest locally
-       → write a status line (the "morning brief")
+       → print the NIGHTLY SUMMARY (rooms/minutes/gaps/flow) + status line (the "morning brief")
 ```
+Data lands in a **per-session folder** `data/<date>_<START_AT>/<room>/`; each run writes **one log
+dir** `runs/<date>_<START_AT>/`.
 Everything after 20:00 is automatic. Your job is **setup once**, then **check the brief each morning**.
 
 **No git clone anywhere** — upload is a direct SDK push (`fleet/ms_upload.py`), so multiple stations
@@ -161,10 +163,27 @@ nohup fleet/nightly.sh > /dev/null 2>&1 &     # all output goes to the per-run l
 echo "launched pid $!"
 tail -f runs/$(date +%Y%m%d)_*/console.log   # watch (Ctrl-C stops watching, NOT the run)
 ```
-Each run logs to **one dir**: `runs/<date>_<START_AT>/` (e.g. `runs/20260819_2000/`) with
-`console.log` (preflight + recording) and `postrun.log` (convert/align/transcribe/pack/upload).
 Leave the machine **powered on and awake** until the upload finishes. To change the window, edit
 `START_AT`/`MINUTES` in `station.env` before launching.
+
+### 4.1 Monitor progress (which file to skim)
+
+Each run logs to **one dir**, `runs/<date>_<START_AT>/` (e.g. `runs/20260819_2000/`), with two files
+matching the two phases — skim the one for the phase you're in:
+
+| Phase | File to `tail -f` | What you see |
+|---|---|---|
+| **during the window** (recording) | `runs/<date>_<START_AT>/console.log` | preflight, per-room connect + real-time keep-up |
+| **after the window** (postprocess) | `runs/<date>_<START_AT>/postrun.log` | convert → align → transcribe → pack → upload → **NIGHTLY SUMMARY** |
+
+```bash
+S=$(date +%Y%m%d)_*                          # tonight; use <date>_* for a past night
+tail -f runs/$S/console.log                  # while recording
+tail -f runs/$S/postrun.log                  # after the window; ENDS with the NIGHTLY SUMMARY
+```
+The **NIGHTLY SUMMARY** (rooms recorded, minutes each, gaps, flow, upload status) is the **last
+thing** in `postrun.log` — that one block is your whole-run picture. (`logs/<date>.log` is the
+recorder's own rotating app log; you rarely need it.)
 
 ---
 
@@ -177,7 +196,7 @@ Y=$(date -d yesterday +%Y%m%d)
 python3 -m json.tool archive/manifest/$Y/st01.json | \
   grep -E '"idle"|"upload"|"summary"|"bandwidth"|"completeness"|"transcription"'   # b) the brief
 df -h .                                        # c) disk
-tail -n 40 runs/${Y}_*/postrun.log             # d) run log (pack/upload); console.log for recording
+tail -n 40 runs/${Y}_*/postrun.log             # d) run log — ENDS with the NIGHTLY SUMMARY
 ```
 
 **What "good" looks like:**
@@ -220,11 +239,27 @@ Full logs: `runs/<date>_<START_AT>/console.log` (recording) + `runs/<date>_<STAR
 
 ## 7. Manual / emergency procedures
 
-### 7.1 Stop everything now (graceful)
+### 7.1 Stop / kill a run
+
+Pick based on whether you want to **keep** tonight's recording (and still upload it) or **throw it away**.
+
+**A) Graceful stop of the recorder — keep & still upload.** The recorder flushes and exits; the
+wrapper carries on to convert/align/transcribe/pack/**upload** whatever was recorded so far:
 ```bash
 pkill -INT -f 'python -u main.py'             # graceful: flush + close (a few seconds)
 sleep 8; pgrep -f 'python -u main.py' | wc -l # should reach 0
 ```
+
+**B) Fully abort the whole job — stop recording AND skip postprocessing/upload.** Kill the wrapper
+first (so it can't advance to the next stage), then the recorder, then postrun if it already began:
+```bash
+pkill -f 'fleet/nightly.sh'                    # the wrapper  (for a test run: pkill -f 'fleet/run.sh')
+pkill -INT -f 'python -u main.py'              # the recorder (graceful flush)
+pkill -f 'fleet/postrun.sh'; pkill -f 'ms_upload.py'   # only if postprocessing/upload already started
+sleep 8; pgrep -f 'python -u main.py' | wc -l  # confirm 0
+```
+Aborting is **safe**: nothing is purged unless an upload already verified, so the recording stays
+under `data/<date>_<START_AT>/`. Resume later with `fleet/postrun.sh --date <date>` (§7.3).
 
 ### 7.2 Run a night manually (if one was missed)
 ```bash
@@ -280,13 +315,17 @@ bash fleet/run.sh --rooms 3 --minutes 2 --stages record,check,transcribe --uploa
 # run a night (manual; launch before START_AT)
 nohup fleet/nightly.sh > /dev/null 2>&1 &                       # logs -> runs/<date>_<START_AT>/
 
+# monitor a live run
+tail -f runs/$(date +%Y%m%d)_*/console.log                     # while recording
+tail -f runs/$(date +%Y%m%d)_*/postrun.log                     # after the window (ends w/ NIGHTLY SUMMARY)
+
 # each morning
 pgrep -f 'python -u main.py' | wc -l                            # 0 = idle
 python3 -m json.tool archive/manifest/$(date -d yesterday +%Y%m%d)/st01.json
 tail -n 40 runs/$(date -d yesterday +%Y%m%d)_*/postrun.log      # run log
 
-# stop now (graceful)
-pkill -INT -f 'python -u main.py'
+# stop recorder gracefully (keeps & still uploads)   |   fully abort the job
+pkill -INT -f 'python -u main.py'                     #   pkill -f 'fleet/nightly.sh'; pkill -INT -f 'python -u main.py'
 ```
 
 Escalate to the PI on: no manifest for a night, repeated upload failures, disk < 40 GB, a wave of
