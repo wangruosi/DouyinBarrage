@@ -55,6 +55,11 @@ WANT[record]=1
 
 say() { echo "[run $(date '+%T')] $*"; }
 
+# ONE log for this test run (script-owned): runs/run_<ts>.log holds everything (preflight +
+# recording + check/transcribe/pack/upload). Exported so record.sh knows we're already teeing.
+export RUN_LOG="$REPO/runs/run_$(date +%Y%m%d_%H%M%S).log"; mkdir -p "$REPO/runs"
+exec > >(tee -a "$RUN_LOG") 2>&1
+
 # ---------------- pre-flight ----------------
 pass=0; fail=0
 ok()   { echo "  [PASS] $*"; pass=$((pass+1)); }

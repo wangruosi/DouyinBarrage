@@ -24,10 +24,12 @@ ARCHIVE="$APP_DIR/archive"
 # the single project venv (recorder + funasr + modelscope); one python for every stage.
 PY="$APP_DIR/.venv/bin/python"; [ -x "$PY" ] || PY=python3
 
-# one log dir per run: runs/{session}/postrun.log  (nightly sets $DOUYIN_SESSION; a manual retry
-# without it falls back to the date). tee -> file + console (cron discards console).
-RUNDIR="$APP_DIR/runs/${DOUYIN_SESSION:-$DATE}"; mkdir -p "$RUNDIR"
-exec > >(tee -a "$RUNDIR/postrun.log") 2>&1
+# logging: under nightly.sh, $RUN_LOG is set and our stdout is already tee'd to the one run log.
+# Run standalone (a manual retry), own a file so the run is still captured (tee -> file + console).
+if [ -z "${RUN_LOG:-}" ]; then
+  RUN_LOG="$APP_DIR/runs/postrun_$DATE.log"; mkdir -p "$APP_DIR/runs"
+  exec > >(tee -a "$RUN_LOG") 2>&1
+fi
 
 # this app's recorder pids (main.py whose cwd is $APP_DIR, so we never touch another checkout's
 # recorder on a shared machine). Defined before the branch — both paths below use it.

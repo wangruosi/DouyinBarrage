@@ -94,11 +94,14 @@ CMD=(python -u main.py "${TARGET[@]}" --log-level "$LOGLEVEL")
 [ "$RECORD" -eq 0 ] && CMD+=(--no-record)
 [ "${#EXTRA[@]}" -gt 0 ] && CMD+=("${EXTRA[@]}")
 
-# one log dir per run: runs/{session}/console.log  (append — nightly.sh's preflight lines land here too)
-RUNDIR="runs/$DOUYIN_SESSION"; mkdir -p "$RUNDIR"
-LOG="$RUNDIR/console.log"
-{ echo "START $(date '+%F %T')  net=$NET record=$RECORD minutes=$MINUTES  -> $LOG"
-  echo "  ${CMD[*]}"; } | tee -a "$LOG"
+# logging: a wrapper (nightly.sh / run.sh) exports $RUN_LOG and is already teeing our stdout there,
+# so we just print. Invoked standalone, own a per-invocation file so the run is still captured.
+if [ -z "${RUN_LOG:-}" ]; then
+  mkdir -p runs; RUN_LOG="runs/rec_$(date +%Y%m%d_%H%M%S).log"
+  exec > >(tee -a "$RUN_LOG") 2>&1
+fi
+echo "START $(date '+%F %T')  net=$NET record=$RECORD minutes=$MINUTES  -> $RUN_LOG"
+echo "  ${CMD[*]}"
 
 if [ "$MINUTES" -gt 0 ]; then
   # timed runs defer ts->mp4 + alignment out of the stop path (postrun/pack handle them),
@@ -107,8 +110,8 @@ if [ "$MINUTES" -gt 0 ]; then
   # SIGINT for graceful stop (flush CSV/SQLite, close timing sidecar).
   # With parallel per-room shutdown + fast ffmpeg escalation, graceful exit takes seconds;
   # --kill-after=120 is a pure safety backstop (was 300 when shutdown was serial/slow).
-  timeout --signal=INT --kill-after=120 "$(( MINUTES * 60 ))" "${CMD[@]}" 2>&1 | tee -a "$LOG"
+  timeout --signal=INT --kill-after=120 "$(( MINUTES * 60 ))" "${CMD[@]}" 2>&1   # stdout already tee'd
 else
-  "${CMD[@]}" 2>&1 | tee -a "$LOG"
+  "${CMD[@]}" 2>&1
 fi
-echo "END $(date '+%F %T')" | tee -a "$LOG"
+echo "END $(date '+%F %T')"

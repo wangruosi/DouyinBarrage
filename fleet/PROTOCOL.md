@@ -20,7 +20,7 @@ You do **not** need to understand the internals. Follow the steps; watch the mor
        → print the NIGHTLY SUMMARY (rooms/minutes/gaps/flow) + status line (the "morning brief")
 ```
 Data lands in a **per-session folder** `data/<date>_<START_AT>/<room>/`; each run writes **one log
-dir** `runs/<date>_<START_AT>/`.
+file** `runs/nightly_<date>.log` (the whole night — `tail -f` it to monitor).
 Everything after 20:00 is automatic. Your job is **setup once**, then **check the brief each morning**.
 
 **No git clone anywhere** — upload is a direct SDK push (`fleet/ms_upload.py`), so multiple stations
@@ -159,31 +159,24 @@ Launch `nightly.sh` **detached**, any time before `START_AT`. It reads `START_AT
 `station.env`, waits for the window, records, then runs the full pipeline:
 ```bash
 cd ~/DouyinBarrage
-nohup fleet/nightly.sh > /dev/null 2>&1 &     # all output goes to the per-run log dir (below)
+nohup fleet/nightly.sh > /dev/null 2>&1 &            # all output goes to the one run log (below)
 echo "launched pid $!"
-tail -f runs/$(date +%Y%m%d)_*/console.log   # watch (Ctrl-C stops watching, NOT the run)
+tail -f runs/nightly_$(date +%Y%m%d).log            # watch (Ctrl-C stops watching, NOT the run)
 ```
 Leave the machine **powered on and awake** until the upload finishes. To change the window, edit
 `START_AT`/`MINUTES` in `station.env` before launching.
 
-### 4.1 Monitor progress (which file to skim)
+### 4.1 Monitor progress — **one file**
 
-Each run logs to **one dir**, `runs/<date>_<START_AT>/` (e.g. `runs/20260819_2000/`), with two files
-matching the two phases — skim the one for the phase you're in:
-
-| Phase | File to `tail -f` | What you see |
-|---|---|---|
-| **during the window** (recording) | `runs/<date>_<START_AT>/console.log` | preflight, per-room connect + real-time keep-up |
-| **after the window** (postprocess) | `runs/<date>_<START_AT>/postrun.log` | convert → align → transcribe → pack → upload → **NIGHTLY SUMMARY** |
-
+The whole night — preflight → recording → convert/align/transcribe/pack/upload → **NIGHTLY
+SUMMARY** — goes into a single file:
 ```bash
-S=$(date +%Y%m%d)_*                          # tonight; use <date>_* for a past night
-tail -f runs/$S/console.log                  # while recording
-tail -f runs/$S/postrun.log                  # after the window; ENDS with the NIGHTLY SUMMARY
+tail -f runs/nightly_$(date +%Y%m%d).log     # tonight  (use the night's date for a past run)
 ```
-The **NIGHTLY SUMMARY** (rooms recorded, minutes each, gaps, flow, upload status) is the **last
-thing** in `postrun.log` — that one block is your whole-run picture. (`logs/<date>.log` is the
-recorder's own rotating app log; you rarely need it.)
+That's it — one `tail`, no phases or subdirs to juggle. The **NIGHTLY SUMMARY** (rooms recorded,
+minutes each, gaps, flow, upload status) is the **last block** in the file — your whole-run picture.
+(`logs/<date>.log` is the recorder's own structured, rotating app log — forensic detail you rarely
+need.)
 
 ---
 
@@ -196,7 +189,7 @@ Y=$(date -d yesterday +%Y%m%d)
 python3 -m json.tool archive/manifest/$Y/st01.json | \
   grep -E '"idle"|"upload"|"summary"|"bandwidth"|"completeness"|"transcription"'   # b) the brief
 df -h .                                        # c) disk
-tail -n 40 runs/${Y}_*/postrun.log             # d) run log — ENDS with the NIGHTLY SUMMARY
+tail -n 40 runs/nightly_$Y.log                 # d) run log — ENDS with the NIGHTLY SUMMARY
 ```
 
 **What "good" looks like:**
@@ -232,8 +225,8 @@ tail -n 40 runs/${Y}_*/postrun.log             # d) run log — ENDS with the NI
 | `pack … no sessions` | nothing recorded (all offline / window missed) | confirm rooms.txt + that streams were live |
 | upload very slow (hours) | ModelScope throttling (normal) | let it finish; not an error |
 
-Full logs: `runs/<date>_<START_AT>/console.log` (recording) + `runs/<date>_<START_AT>/postrun.log`
-(pack/upload). The recorder's own rotating app log is `logs/<date>.log`.
+Full log: `runs/nightly_<date>.log` (the whole night — recording through upload + NIGHTLY SUMMARY).
+The recorder's own structured, rotating app log is `logs/<date>.log` (forensic detail).
 
 ---
 
@@ -313,16 +306,15 @@ bash fleet/run.sh --rooms 3 --minutes 2 --stages record,check,transcribe --uploa
      --repo-id SISU_DynCogLab/douyin-dataset --station st01        # acceptance test
 
 # run a night (manual; launch before START_AT)
-nohup fleet/nightly.sh > /dev/null 2>&1 &                       # logs -> runs/<date>_<START_AT>/
+nohup fleet/nightly.sh > /dev/null 2>&1 &                       # logs -> runs/nightly_<date>.log
 
-# monitor a live run
-tail -f runs/$(date +%Y%m%d)_*/console.log                     # while recording
-tail -f runs/$(date +%Y%m%d)_*/postrun.log                     # after the window (ends w/ NIGHTLY SUMMARY)
+# monitor a live run  (ONE file: recording -> upload -> NIGHTLY SUMMARY)
+tail -f runs/nightly_$(date +%Y%m%d).log
 
 # each morning
 pgrep -f 'python -u main.py' | wc -l                            # 0 = idle
 python3 -m json.tool archive/manifest/$(date -d yesterday +%Y%m%d)/st01.json
-tail -n 40 runs/$(date -d yesterday +%Y%m%d)_*/postrun.log      # run log
+tail -n 40 runs/nightly_$(date -d yesterday +%Y%m%d).log        # run log
 
 # stop recorder gracefully (keeps & still uploads)   |   fully abort the job
 pkill -INT -f 'python -u main.py'                     #   pkill -f 'fleet/nightly.sh'; pkill -INT -f 'python -u main.py'
