@@ -83,6 +83,10 @@ if [ -n "$AT" ]; then
   fi
 fi
 
+# per-session folder stamp (data/{stamp}/{room}/). Preset+exported by nightly.sh (START_AT) or
+# run.sh; if we were invoked directly, default to the actual start minute (after any --at wait).
+: "${DOUYIN_SESSION:=$(date +%Y%m%d_%H%M)}"; export DOUYIN_SESSION
+
 # assemble main.py command
 if [ -n "$ROOM" ]; then TARGET=("$ROOM"); else TARGET=(--all); fi
 CMD=(python -u main.py "${TARGET[@]}" --log-level "$LOGLEVEL")
@@ -90,11 +94,11 @@ CMD=(python -u main.py "${TARGET[@]}" --log-level "$LOGLEVEL")
 [ "$RECORD" -eq 0 ] && CMD+=(--no-record)
 [ "${#EXTRA[@]}" -gt 0 ] && CMD+=("${EXTRA[@]}")
 
-# tee output to runs/<timestamp>.log
-mkdir -p runs
-LOG="runs/$(date +%Y%m%d_%H%M%S).log"
-echo "START $(date '+%F %T')  net=$NET record=$RECORD minutes=$MINUTES  -> $LOG"
-echo "  ${CMD[*]}"
+# one log dir per run: runs/{session}/console.log  (append — nightly.sh's preflight lines land here too)
+RUNDIR="runs/$DOUYIN_SESSION"; mkdir -p "$RUNDIR"
+LOG="$RUNDIR/console.log"
+{ echo "START $(date '+%F %T')  net=$NET record=$RECORD minutes=$MINUTES  -> $LOG"
+  echo "  ${CMD[*]}"; } | tee -a "$LOG"
 
 if [ "$MINUTES" -gt 0 ]; then
   # timed runs defer ts->mp4 + alignment out of the stop path (postrun/pack handle them),
@@ -103,8 +107,8 @@ if [ "$MINUTES" -gt 0 ]; then
   # SIGINT for graceful stop (flush CSV/SQLite, close timing sidecar).
   # With parallel per-room shutdown + fast ffmpeg escalation, graceful exit takes seconds;
   # --kill-after=120 is a pure safety backstop (was 300 when shutdown was serial/slow).
-  timeout --signal=INT --kill-after=120 "$(( MINUTES * 60 ))" "${CMD[@]}" 2>&1 | tee "$LOG"
+  timeout --signal=INT --kill-after=120 "$(( MINUTES * 60 ))" "${CMD[@]}" 2>&1 | tee -a "$LOG"
 else
-  "${CMD[@]}" 2>&1 | tee "$LOG"
+  "${CMD[@]}" 2>&1 | tee -a "$LOG"
 fi
-echo "END $(date '+%F %T')"
+echo "END $(date '+%F %T')" | tee -a "$LOG"

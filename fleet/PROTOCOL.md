@@ -13,7 +13,7 @@ You do **not** need to understand the internals. Follow the steps; watch the mor
 ```
 20:00  start recording ~30 rooms (danmaku/like/social CSV + SD video, split into 1h segments)
 22:00  stop → convert .ts→.mp4 → align chat↔video + coverage check
-       → transcribe each room (SenseVoice-Small, CPU) → transcript.csv + lossless FLAC voice audio
+       → transcribe each room (SenseVoice-Small, CPU) → transcript_sensevoice.csv + lossless FLAC voice audio
        → pack: video shards (≤7GB) / audio tar / text+transcript bundle / manifest
        → [wait UPLOAD_DELAY] → upload to ModelScope via SDK + verify
        → purge local video+audio (only after verify) → keep text+manifest locally
@@ -157,10 +157,12 @@ Launch `nightly.sh` **detached**, any time before `START_AT`. It reads `START_AT
 `station.env`, waits for the window, records, then runs the full pipeline:
 ```bash
 cd ~/DouyinBarrage
-nohup fleet/nightly.sh > runs/nightly_$(date +%Y%m%d).out 2>&1 &
+nohup fleet/nightly.sh > /dev/null 2>&1 &     # all output goes to the per-run log dir (below)
 echo "launched pid $!"
-tail -f logs/nightly-$(date +%Y%m%d).log     # watch (Ctrl-C stops watching, NOT the run)
+tail -f runs/$(date +%Y%m%d)_*/console.log   # watch (Ctrl-C stops watching, NOT the run)
 ```
+Each run logs to **one dir**: `runs/<date>_<START_AT>/` (e.g. `runs/20260819_2000/`) with
+`console.log` (preflight + recording) and `postrun.log` (convert/align/transcribe/pack/upload).
 Leave the machine **powered on and awake** until the upload finishes. To change the window, edit
 `START_AT`/`MINUTES` in `station.env` before launching.
 
@@ -175,7 +177,7 @@ Y=$(date -d yesterday +%Y%m%d)
 python3 -m json.tool archive/manifest/$Y/st01.json | \
   grep -E '"idle"|"upload"|"summary"|"bandwidth"|"completeness"|"transcription"'   # b) the brief
 df -h .                                        # c) disk
-tail -n 30 logs/nightly-$Y.log                 # d) run log
+tail -n 40 runs/${Y}_*/postrun.log             # d) run log (pack/upload); console.log for recording
 ```
 
 **What "good" looks like:**
@@ -211,7 +213,8 @@ tail -n 30 logs/nightly-$Y.log                 # d) run log
 | `pack … no sessions` | nothing recorded (all offline / window missed) | confirm rooms.txt + that streams were live |
 | upload very slow (hours) | ModelScope throttling (normal) | let it finish; not an error |
 
-Full logs: `logs/nightly-YYYYMMDD.log` and `runs/*.out`.
+Full logs: `runs/<date>_<START_AT>/console.log` (recording) + `runs/<date>_<START_AT>/postrun.log`
+(pack/upload). The recorder's own rotating app log is `logs/<date>.log`.
 
 ---
 
@@ -240,6 +243,15 @@ It re-aligns/transcribes/packs/uploads/verifies and purges **ONLY on VERIFIED**.
 failing, check internet + token and tell the PI. **Do NOT manually delete `data/`** — that loses
 the night. (Text bundle + manifest are always archived under `archive/` regardless.)
 
+**Upload-only retry (skip the re-processing).** If the earlier run already converted/aligned/
+transcribed/packed and only the *network push* failed, the packed tree is still in
+`upload_staging/<date>/`. Re-push just that — no need to redo the (slow) align/transcribe/pack:
+```bash
+cd ~/DouyinBarrage && fleet/postrun.sh --date <YYYYMMDD> --upload-only
+```
+It uploads the existing staging, verifies, and purges on success. If the staging is gone (e.g. it
+was cleared), it errors out and tells you to re-run **without** `--upload-only` to rebuild it.
+
 ### 7.4 Disk getting full
 Usually means uploads are failing and data is piling up. Fix the upload (§7.3). Never delete `data/`
 by hand unless the PI confirms that night is already safely on ModelScope.
@@ -266,11 +278,12 @@ bash fleet/run.sh --rooms 3 --minutes 2 --stages record,check,transcribe --uploa
      --repo-id SISU_DynCogLab/douyin-dataset --station st01        # acceptance test
 
 # run a night (manual; launch before START_AT)
-nohup fleet/nightly.sh > runs/nightly_$(date +%Y%m%d).out 2>&1 &
+nohup fleet/nightly.sh > /dev/null 2>&1 &                       # logs -> runs/<date>_<START_AT>/
 
 # each morning
 pgrep -f 'python -u main.py' | wc -l                            # 0 = idle
 python3 -m json.tool archive/manifest/$(date -d yesterday +%Y%m%d)/st01.json
+tail -n 40 runs/$(date -d yesterday +%Y%m%d)_*/postrun.log      # run log
 
 # stop now (graceful)
 pkill -INT -f 'python -u main.py'

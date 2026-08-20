@@ -508,6 +508,11 @@ def main_multi(room_list, log_level, live_stop, record=None):
         print("错误：未选择任何房间")
         sys.exit(1)
 
+    # 冻结本次录制会话标签（YYYYMMDD_HHMM）——一次算定、全房间共用，保证所有房间落在同一
+    # data/{stamp}/ 目录下。包装脚本可通过 $DOUYIN_SESSION 预设（nightly.sh 用 START_AT）。
+    os.environ.setdefault('DOUYIN_SESSION', datetime.now().strftime('%Y%m%d_%H%M'))
+    print(f"会话目录: data/{os.environ['DOUYIN_SESSION']}/")
+
     print("")
     print("=" * 45)
     print("开始多房间采集（热加载模式）")

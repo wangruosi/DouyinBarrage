@@ -8,7 +8,7 @@ Per room, for each recorded video segment:
   3. split into sentences (on 。！？), map each sentence's start onto the WALL-CLOCK timeline
      via align.video_to_wall (so transcript shares the chat/like/social axis)
   4. encode a compact Opus copy of the audio (for the `audio/` upload artifact)
-Writes  transcript.csv  (time, video_pts_s, end, segment_file, text, emotion, event, lang)
+Writes  transcript_sensevoice.csv  (time, video_pts_s, end, segment_file, text, emotion, event, lang)
 and      <segment>.16k.flac  next to the video (one per video segment — mirrors the recorder's
 segmentation; kept losslessly for later re-transcription).  Runs after align (needs timing_*.csv).
 
@@ -107,7 +107,7 @@ def sentences(chars):
 
 
 def transcribe_session(session_dir, keep_wav=False):
-    """Transcribe every video segment in one room; write transcript.csv + <seg>.16k.opus.
+    """Transcribe every video segment in one room; write transcript_sensevoice.csv + <seg>.16k.flac.
     Returns stats dict, or None if there's no timing sidecar (can't place on the timeline)."""
     import wave
     timing = align.load_timing(session_dir)
@@ -131,7 +131,7 @@ def transcribe_session(session_dir, keep_wav=False):
                 audio_s += w.getnframes() / w.getframerate()
             res = model.generate(input=wav, cache={}, language="auto", use_itn=True,
                                  batch_size_s=300, merge_vad=True, merge_length_s=15,
-                                 output_timestamp=True)
+                                 output_timestamp=True, disable_pbar=True)   # no per-clip tqdm spam in the log
             r = res[0]
             chars = parse_tagged(r.get("text", ""), r.get("words", []), r.get("timestamp", []))
             for s in sentences(chars):
@@ -152,7 +152,7 @@ def transcribe_session(session_dir, keep_wav=False):
                 os.remove(wav)
 
     if rows:
-        out = os.path.join(session_dir, "transcript.csv")
+        out = os.path.join(session_dir, "transcript_sensevoice.csv")
         with open(out, "w", newline="", encoding="utf-8-sig") as f:
             w = csv.DictWriter(f, fieldnames=["time", "video_pts_s", "end", "segment_file",
                                               "text", "emotion", "event", "lang"])
@@ -179,18 +179,17 @@ def transcribe_all(sessions, jobs=1, keep_wav=False, log=print):
             futs = {ex.submit(_worker, (sd, keep_wav)): sd for sd in sessions}
             for fu in as_completed(futs):
                 r = fu.result()
-                if r: results.append(r)
-                if r: log(f"[asr] {r.get('room')}: "
-                          + (f"{r['sentences']} sentences, {r['audio_s']}s @ {r['rtf']}x"
-                             if "error" not in r else f"ERROR {r['error']}"))
+                if r:
+                    results.append(r)
+                    if "error" in r:                      # quiet: only surface failures per-room;
+                        log(f"[asr] {r.get('room')}: ERROR {r['error']}")   # the aggregate prints once
     else:
         for sd in sessions:
             r = _worker((sd, keep_wav))
             if r:
                 results.append(r)
-                log(f"[asr] {r.get('room')}: "
-                    + (f"{r['sentences']} sentences, {r['audio_s']}s @ {r['rtf']}x"
-                       if "error" not in r else f"ERROR {r['error']}"))
+                if "error" in r:
+                    log(f"[asr] {r.get('room')}: ERROR {r['error']}")
     ok = [r for r in results if "error" not in r]
     total_audio = sum(r["audio_s"] for r in ok)
     total_comp = sum(r["compute_s"] for r in ok)

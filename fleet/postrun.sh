@@ -4,15 +4,17 @@
 #
 # No git clone. Uploads via fleet/ms_upload.py (upload_folder + retry-429 + verify).
 # Purge is GATED on a verified upload; text bundle + manifest are archived locally forever.
-# Layout: data/{DATE}/{anchor}/  ->  staging/{video,text,manifest}/{DATE}/{STATION}/...
+# Layout: data/{DATE}_{HHMM}/{anchor}/  ->  staging/{video,text,manifest}/{DATE}/{STATION}/...
+# (processes every per-session folder of {DATE}: data/{DATE}_*)
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$HERE/station.env"
 # which night to process: --date YYYYMMDD  (for a next-morning retry) > $DATE env > today
-DATE_ARG=""
+DATE_ARG=""; UPLOAD_ONLY=0
 while [ $# -gt 0 ]; do case "$1" in
   --date) DATE_ARG="$2"; shift 2;;
-  *) echo "postrun.sh: unknown arg '$1' (use --date YYYYMMDD)" >&2; exit 2;;
+  --upload-only) UPLOAD_ONLY=1; shift;;   # resume a failed upload from existing staging (no re-pack)
+  *) echo "postrun.sh: unknown arg '$1' (use --date YYYYMMDD | --upload-only)" >&2; exit 2;;
 esac; done
 DATE="${DATE_ARG:-${DATE:-$(date +%Y%m%d)}}"
 log() { echo "[postrun $(date '+%F %T')] $*"; }
@@ -22,11 +24,34 @@ ARCHIVE="$APP_DIR/archive"
 # the single project venv (recorder + funasr + modelscope); one python for every stage.
 PY="$APP_DIR/.venv/bin/python"; [ -x "$PY" ] || PY=python3
 
-# ---------- A. assert the recorder is gone ----------
-# Only THIS app's recorder: match main.py processes whose cwd is $APP_DIR, so we never signal
-# another checkout / unrelated `python -u main.py` on a shared machine.
+# one log dir per run: runs/{session}/postrun.log  (nightly sets $DOUYIN_SESSION; a manual retry
+# without it falls back to the date). tee -> file + console (cron discards console).
+RUNDIR="$APP_DIR/runs/${DOUYIN_SESSION:-$DATE}"; mkdir -p "$RUNDIR"
+exec > >(tee -a "$RUNDIR/postrun.log") 2>&1
+
+# this app's recorder pids (main.py whose cwd is $APP_DIR, so we never touch another checkout's
+# recorder on a shared machine). Defined before the branch — both paths below use it.
 recorder_pids() { for p in $(pgrep -f "python -u main.py" 2>/dev/null); do
   [ "$(readlink -f "/proc/$p/cwd" 2>/dev/null)" = "$APP_DIR" ] && printf '%s ' "$p"; done; }
+
+if [ "$UPLOAD_ONLY" = 1 ]; then
+  # --upload-only: resume a previously-FAILED upload from the staging tree the last run left behind.
+  # Skip all the (already-done) convert/align/transcribe/pack/archive/stagger work; guard that the
+  # packed staging actually exists, then fall straight through to the upload/purge/status steps.
+  [ -f "$STAGING/manifest/$DATE/$STATION.json" ] || {
+    log "ERROR --upload-only: no packed staging for $DATE (expected $STAGING/manifest/$DATE/$STATION.json)."
+    log "       Re-run postrun WITHOUT --upload-only to rebuild staging from data/$DATE."
+    exit 1; }
+  # SAFETY: a verified upload triggers the purge below — never do that while a recording is live.
+  [ -n "$(recorder_pids)" ] && {
+    log "ERROR --upload-only: recorder still running (this app) — refusing (a verified upload PURGES data/)."
+    log "       Stop the recorder first (pkill -INT -f 'python -u main.py'), then retry."
+    exit 1; }
+  IDLE=true
+  log "--upload-only: reusing staging $STAGING (skipping convert/align/transcribe/pack/archive/stagger)"
+else
+
+# ---------- A. assert the recorder is gone ----------
 if [ -n "$(recorder_pids)" ]; then
   log "WARN recorder still running (this app) — SIGINT"; kill -INT $(recorder_pids) 2>/dev/null || true
   for _ in $(seq 1 30); do [ -z "$(recorder_pids)" ] && break; sleep 2; done
@@ -39,7 +64,7 @@ log "convert ts->mp4 ..."
 "$PY" - "$DATA_DIR" "$DATE" <<'PYEOF' || log "WARN convert had issues (non-fatal)"
 import sys, glob, os, subprocess, concurrent.futures as cf
 data, date = sys.argv[1], sys.argv[2]
-ts = sorted(glob.glob(f"{data}/{date}/*/*.ts"))
+ts = sorted(glob.glob(f"{data}/{date}*/*/*.ts"))   # {date}* spans all per-session folders data/{date}_HHMM/
 def conv(t):
     mp4 = t[:-3] + ".mp4"
     if os.path.exists(mp4) and os.path.getsize(mp4) > 0:
@@ -67,13 +92,13 @@ CHECK_JSON="$(mktemp)"
 import sys, glob, os, json
 sys.path.insert(0, os.getcwd()); import align
 data, date, out = sys.argv[1], sys.argv[2], sys.argv[3]
-sessions = sorted(s for s in glob.glob(f"{data}/{date}/*") if os.path.isdir(s))
+sessions = sorted(s for s in glob.glob(f"{data}/{date}*/*") if os.path.isdir(s))   # all sessions of the date
 stats = align.check(sessions) or {}
 json.dump(stats, open(out, "w", encoding="utf-8"), ensure_ascii=False)
 PYEOF
 ) || log "WARN align/check had issues (non-fatal)"
 
-# ---------- A3. transcribe (SenseVoice-Small, CPU) -> transcript.csv + <seg>.16k.flac ----------
+# ---------- A3. transcribe (SenseVoice-Small, CPU) -> transcript_sensevoice.csv + <seg>.16k.flac ----------
 # Uses $PY (the project .venv with funasr+torch). Non-fatal: a missing ASR env just skips transcripts.
 log "transcribe (SenseVoice-Small, CPU, jobs=${ASR_JOBS:-1}) ..."
 ASR_JSON="$(mktemp)"
@@ -82,7 +107,8 @@ import sys, os, json
 sys.path.insert(0, os.getcwd()); sys.path.insert(0, os.path.join(os.getcwd(), "fleet"))
 import align, transcribe
 data, date, out, jobs = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4])
-sessions = align.discover_sessions(f"{data}/{date}")
+import glob
+sessions = sorted(s for d in glob.glob(f"{data}/{date}*") for s in align.discover_sessions(d))
 stats = transcribe.transcribe_all(sessions, jobs=jobs) if sessions else {}
 stats.pop("rooms", None)                      # keep the manifest block compact
 json.dump(stats, open(out, "w", encoding="utf-8"), ensure_ascii=False)
@@ -130,6 +156,8 @@ if [ "${UPLOAD_DELAY:-0}" -gt 0 ] 2>/dev/null; then
   log "upload stagger: sleeping ${UPLOAD_DELAY}s before push (UPLOAD_DELAY)"; sleep "$UPLOAD_DELAY"
 fi
 
+fi   # end of the full-pipeline block (skipped under --upload-only)
+
 # ---------- C. upload via SDK (retry-429 + verify) ----------
 log "upload -> $REPO_ID ..."
 if "$PY" "$HERE/ms_upload.py" --repo-id "$REPO_ID" --staging "$STAGING" \
@@ -143,7 +171,7 @@ log "upload=$UPLOAD"
 # ---------- D. purge — ONLY when verified ----------
 if [ "$UPLOAD" = verified ]; then
   before=$(du -sk "$DATA_DIR" 2>/dev/null | awk '{print int($1/1024)}')
-  rm -rf "$DATA_DIR/$DATE" "$STAGING"
+  rm -rf "$DATA_DIR/$DATE" "$DATA_DIR/${DATE}"_* "$STAGING"   # {DATE} (legacy) + all per-session folders
   after=$(du -sk "$DATA_DIR" 2>/dev/null | awk '{print int($1/1024)}')
   log "verified -> purged data/$DATE + staging (data/ ${before}MB->${after}MB); kept archive/ text+manifest"
 else
@@ -154,6 +182,21 @@ fi
 FREE=$(df -Pk "$DATA_DIR" | awk 'NR==2{print int($4/1024/1024)}')
 [ "$FREE" -lt "$DISK_FLOOR_GB" ] && log "WARN disk low: ${FREE}GB < floor ${DISK_FLOOR_GB}GB"
 log "DONE station=$STATION date=$DATE idle=$IDLE upload=$UPLOAD disk_free=${FREE}GB"
+
+# ---------- F. NIGHTLY SUMMARY (rooms / minutes / gaps / flow) — the LAST thing in the log ----------
+# Rendered from the archived manifest (survives the purge above), so no recompute.
+( cd "$APP_DIR" && "$PY" - "$ARCHIVE/manifest/$DATE/$STATION.json" "$STATION" \
+    "${DOUYIN_SESSION:-$DATE}" "$IDLE" "$UPLOAD" "$FREE" "${MINUTES:-0}" <<'PYEOF'
+import sys, os, json
+sys.path.insert(0, os.getcwd()); import align
+p, station, session, idle, upload, free, win = sys.argv[1:8]
+try:
+    m = json.load(open(p, encoding="utf-8"))
+except Exception:
+    sys.exit(0)
+print(align.render_nightly_summary(m, station, session, idle, upload, free, int(win)))
+PYEOF
+) || true
 
 # non-zero exit if something needs a human (not idle, or upload failed)
 [ "$IDLE" = true ] && [ "$UPLOAD" = verified ]

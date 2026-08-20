@@ -19,7 +19,7 @@ import time
 from collections import deque
 from datetime import datetime
 
-from base.utils import SCRIPT_DIR, sanitize_dir_name, get_anchor_dir
+from base.utils import SCRIPT_DIR, sanitize_dir_name, get_anchor_dir, session_stamp
 class RoomLogFilter(logging.Filter):
     """根据当前线程名自动添加 [主播名] 前缀。
 
@@ -395,10 +395,11 @@ class DataRecorder:
         now = datetime.now()
         self._ts = now.strftime('%Y%m%d_%H%M')
 
-        # v2 layout: data/{YYYYMMDD}/{anchor}/  (date/session at root, room inside)
+        # v2 layout: data/{YYYYMMDD_HHMM}/{anchor}/  (per-session folder at root, room inside)
         self._dir = get_anchor_dir(self._base_dir, self._anchor_name, self.live_id,
-                                   now.strftime('%Y%m%d'))
-        # same-day re-open of this room (wait-mode) must not clobber the first session
+                                   session_stamp())
+        # defensive: a stale same-session dir must not clobber a first pass (normally never fires —
+        # each run gets its own {stamp} folder, so within a fresh session chat.csv won't pre-exist)
         if os.path.exists(os.path.join(self._dir, 'chat.csv')):
             self._dir = f"{self._dir}_{now.strftime('%H%M')}"
         self._live_dir = self._dir

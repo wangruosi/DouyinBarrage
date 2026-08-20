@@ -242,6 +242,81 @@ def _fmt_dur(s):
     return f"{s//60}m{s%60:02d}s"
 
 
+def _disp_w(s):
+    """Terminal display width (CJK/full-width chars count as 2)."""
+    import unicodedata
+    return sum(2 if unicodedata.east_asian_width(c) in 'WF' else 1 for c in s)
+
+
+def _cell(s, w):
+    """Left-justify `s` to display width `w`, truncating (…) if it would overflow."""
+    if _disp_w(s) > w:
+        out = ""
+        for c in s:
+            if _disp_w(out) + _disp_w(c) > w - 1:
+                break
+            out += c
+        s = out + "…"
+    return s + " " * max(0, w - _disp_w(s))
+
+
+def _fmt_gaps(gaps):
+    """Compact gaps cell: 'none' | '1 break 42s @ 1m12s' | '2 breaks (18s, 7s)' (+N more)."""
+    if not gaps:
+        return "none"
+    if len(gaps) == 1:
+        d, at = gaps[0]
+        return f"1 break {d:.0f}s @ {_fmt_dur(at)}"
+    shown = ", ".join(f"{d:.0f}s" for d, _ in gaps[:2])
+    more = f" +{len(gaps) - 2} more" if len(gaps) > 2 else ""
+    return f"{len(gaps)} breaks ({shown}{more})"
+
+
+def render_nightly_summary(m, station, session, idle, upload, disk_free_gb, window_min=0):
+    """Format the end-of-run NIGHTLY SUMMARY from a station manifest dict `m` (which carries the
+    bandwidth check's per_room rows + transcription block). Pure string builder — no recompute."""
+    bw = m.get('bandwidth') or {}
+    rows = bw.get('per_room') or []
+    tr = m.get('transcription') or {}
+    have = [r for r in rows if not r.get('no_data')]
+    n_short = sum(1 for r in have if r.get('flow') is None)
+    n_nodata = sum(1 for r in rows if r.get('no_data'))
+    W = 82
+    L = ["=" * W, f"NIGHTLY SUMMARY  station={station}  session={session}"]
+    hdr = f"recorded {len(have)} rooms"
+    extra = ", ".join(x for x in (f"{n_short} short" if n_short else "",
+                                  f"{n_nodata} no-data" if n_nodata else "") if x)
+    if extra:
+        hdr += f" ({extra})"
+    if window_min:
+        hdr += f"   window {round(window_min / 60, 1)}h"
+    hdr += f"   upload={upload}   idle={idle}   disk_free={disk_free_gb}GB"
+    RW = 26   # room column display width
+    L += [hdr, "",
+          f"  {_cell('room', RW)} {'rec':>5}  {'video / wall':>15}  {'flow':>5} {'cover':>5}  gaps",
+          "  " + "-" * (W - 2)]
+    for r in rows:
+        rec = f"{round(r['wall_s'] / 60)}m" if r.get('wall_s') else "-"
+        vw = f"{_fmt_dur(r['video_s'])} / {_fmt_dur(r['wall_s'])}" if r.get('wall_s') else "-"
+        flow = f"{r['flow']:.2f}" if r.get('flow') is not None else "-"
+        cov = f"{r['cover']:.2f}" if r.get('wall_s') else "-"
+        tag = "  (no-data)" if r.get('no_data') else ("  (short)" if r.get('flow') is None else "")
+        L.append(f"  {_cell(r['room'], RW)} {rec:>5}  {vw:>15}  {flow:>5} {cov:>5}  {_fmt_gaps(r.get('gaps') or [])}{tag}")
+    L.append("")
+    if bw.get('bandwidth_limited'):
+        sus = ", ".join(f"{s['room']} {s['flow']:.2f}" for s in bw.get('suspects', []))
+        L.append(f"  bandwidth:     ⚠ LIMITED — multiple rooms below real time: {sus}")
+    else:
+        L.append("  bandwidth:     ✓ OK — every rated room tracked real time (flow ≥ 0.95)")
+    if tr:
+        L.append(f"  transcription: {tr.get('transcribed', 0)} rooms · {tr.get('sentences', 0)} sentences "
+                 f"· {tr.get('audio_hours', 0)}h @ {tr.get('mean_rtf')}x realtime")
+    if bw.get('verdict'):
+        L.append(f"  verdict:       {bw['verdict']}")
+    L.append("=" * W)
+    return "\n".join(L)
+
+
 def summarize_session(session_dir):
     """Return per-session health, or None if no timing sidecar."""
     rows = []
@@ -354,10 +429,10 @@ def report(sessions):
     # bandwidth is a SHARED constraint: real starvation hits several rooms at once.
     if len(bw) >= 2:
         print(f"  ⚠ BANDWIDTH-LIMITED — {len(bw)} rooms below real time (flow<{FLOW_MIN}): "
-              + ", ".join(f"{l.split('/')[0]} {f:.2f}" for l, f in bw))
+              + ", ".join(f"{l.split('/')[-1]} {f:.2f}" for l, f in bw))
         verdict = "BANDWIDTH is the constraint — multiple rooms fell behind real time."
     elif len(bw) == 1:
-        print(f"  1 isolated room below real time: {bw[0][0].split('/')[0]} {bw[0][1]:.2f} "
+        print(f"  1 isolated room below real time: {bw[0][0].split('/')[-1]} {bw[0][1]:.2f} "
               f"(room-specific, not shared bandwidth)")
         verdict = "bandwidth OK; one isolated room dip (stream-side, not the shared pipe)."
     else:
@@ -365,9 +440,9 @@ def report(sessions):
         verdict = "bandwidth OK; any missing video is reconnects/offline, not bandwidth."
     if brk:
         print("  breaks/offline (low cover, flow ok): "
-              + ", ".join(f"{l.split('/')[0]} {c:.2f}" for l, c in brk[:8]))
+              + ", ".join(f"{l.split('/')[-1]} {c:.2f}" for l, c in brk[:8]))
     if nodata:
-        print("  no-data (barely started / offline): " + ", ".join(l.split('/')[0] for l in nodata[:8]))
+        print("  no-data (barely started / offline): " + ", ".join(l.split('/')[-1] for l in nodata[:8]))
     if short:
         print(f"  ({short} rooms too short (<{MIN_DUR}s) to rate flow)")
     print("  verdict: " + verdict)
@@ -375,8 +450,23 @@ def report(sessions):
     print(f"\n  flow per room (desc):")
     for l, s in sorted(stats, key=lambda ls: -ls[1]['flow']):
         tag = "" if s['main_wall'] >= MIN_DUR else "  (short)"
-        print(f"    {s['flow']:.3f}  cover {s['coverage']:.2f}  {_fmt_dur(s['main_wall']):>6}  {l.split('/')[0]}{tag}")
+        print(f"    {s['flow']:.3f}  cover {s['coverage']:.2f}  {_fmt_dur(s['main_wall']):>6}  {l.split('/')[-1]}{tag}")
     print("=" * 64)
+
+    # per-room rows for the end-of-run NIGHTLY SUMMARY (worst flow first; short/no-data last).
+    # room = label's last component (label is "{session}/{anchor}", so [-1] is the room).
+    def _room_row(l, s):
+        rated = s['main_wall'] >= MIN_DUR
+        return dict(room=l.split('/')[-1],
+                    video_s=round(s['video'], 1), wall_s=round(s['wall'], 1),
+                    flow=round(s['flow'], 3) if rated else None,
+                    cover=round(s['coverage'], 3), short=not rated,
+                    gaps=[[round(d, 1), round(off, 1)] for d, iso, off, kind
+                          in sorted(s['breaks'], key=lambda b: -b[0])])
+    per_room = [_room_row(l, s) for l, s in
+                sorted(stats, key=lambda ls: (ls[1]['main_wall'] < MIN_DUR, ls[1]['flow']))]
+    per_room += [dict(room=l.split('/')[-1], video_s=0, wall_s=0, flow=None,
+                      cover=0, short=False, gaps=[], no_data=True) for l in nodata]
 
     return {
         'rooms': len(stats), 'no_data': len(nodata), 'short': short,
@@ -384,8 +474,9 @@ def report(sessions):
         'flow_min': round(min(flows), 4) if flows else None,
         'cover_mean': round(mean(covers), 4), 'cover_min': round(min(covers), 4),
         'bandwidth_limited': len(bw) >= 2,
-        'suspects': [{'room': l.split('/')[0], 'flow': round(f, 3)} for l, f in bw],
+        'suspects': [{'room': l.split('/')[-1], 'flow': round(f, 3)} for l, f in bw],
         'verdict': verdict,
+        'per_room': per_room,
     }
 
 

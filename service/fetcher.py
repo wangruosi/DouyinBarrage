@@ -42,7 +42,7 @@ from base.utils import (
     load_config, load_cookies,
     USER_AGENTS, LOW_VALUE_TYPES, INTERACTIVE_TYPES, METHOD_TO_CONFIG,
     generate_user_unique_id, extract_ua_version,
-    rotate_ua, sanitize_dir_name, get_anchor_dir,
+    rotate_ua, sanitize_dir_name, get_anchor_dir, session_stamp,
     DEFAULT_CONFIG,
 )
 from base.output import setup_logger, DataRecorder, ThroughputCounter, RoomLogFilter
@@ -1030,8 +1030,7 @@ class DouyinBarrage:
             room_dir = rec.session_dir
         else:
             output_dir = self.config.get('output_dir', 'data')
-            room_dir = get_anchor_dir(output_dir, anchor_name, self.live_id,
-                                      datetime.now().strftime('%Y%m%d'))
+            room_dir = get_anchor_dir(output_dir, anchor_name, self.live_id, session_stamp())
         meta_file = os.path.join(room_dir, 'meta.json')
 
         if os.path.exists(meta_file):

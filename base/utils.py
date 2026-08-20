@@ -401,12 +401,26 @@ def get_user_id(user):
 
 
 def get_anchor_dir(output_dir: str, anchor_name: str, live_id: str, date: str = None) -> str:
-    """主播输出目录。v2 布局：date-at-root -> output_dir/{date}/{anchor}。
-    未传 date 时回退到旧布局 output_dir/{anchor}（向后兼容）。"""
+    """主播输出目录。v2 布局：output_dir/{date}/{anchor}，其中 date 传入的是会话目录标签
+    （通常为 session_stamp() 的 {YYYYMMDD_HHMM}，见调用处）。未传 date 时回退到旧布局
+    output_dir/{anchor}（向后兼容）。"""
     dir_name = sanitize_dir_name(anchor_name) or live_id
     if date:
         return os.path.join(output_dir, date, dir_name)
     return os.path.join(output_dir, dir_name)
+
+
+def session_stamp():
+    """本次录制会话的目录标签 'YYYYMMDD_HHMM' —— 一个进程内所有房间共用同一个值，
+    因此同一场录制的全部房间都落在 data/{stamp}/ 下（而非按天 data/{date}/）。
+
+    包装脚本（nightly.sh 用 START_AT / run.sh、record.sh 用启动时刻）与 main.py 会预先
+    设置 $DOUYIN_SESSION；若未设置，则由第一个调用者冻结为当前时刻，保证后续调用一致。"""
+    s = os.environ.get('DOUYIN_SESSION')
+    if not s:
+        s = time.strftime('%Y%m%d_%H%M')
+        os.environ['DOUYIN_SESSION'] = s
+    return s
 
 
 # ── 默认配置 ──────────────────────────────────────

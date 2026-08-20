@@ -109,12 +109,13 @@ fi
 
 # ---------------- stage: record ----------------
 DATE=$(date +%Y%m%d)
-say "STAGE record — ${MINUTES}m"
-STAMP=$(date +%s)
+# this run's per-session folder: data/{stamp}/{room}/ (exported so record.sh + main.py agree)
+export DOUYIN_SESSION="$(date +%Y%m%d_%H%M)"
+say "STAGE record — ${MINUTES}m -> data/$DOUYIN_SESSION"
 RARGS=(--minutes "$MINUTES" --log-level INFO); [ -n "$ROOM" ] && RARGS+=(--room "$ROOM")
 bash scripts/record.sh "${RARGS[@]}" || true
-# v2 layout: sessions are data/{DATE}/{anchor} (depth 2), created during this run
-mapfile -t SESS < <(find "data/$DATE" -mindepth 1 -maxdepth 1 -type d -newermt "@$STAMP" 2>/dev/null | sort)
+# v2 layout: this run's rooms live under its own data/{stamp}/ folder (data/{stamp}/{anchor})
+mapfile -t SESS < <(find "data/$DOUYIN_SESSION" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort)
 say "recorded ${#SESS[@]} session(s)"
 [ "${#SESS[@]}" -eq 0 ] && { echo "INCONCLUSIVE — no rooms recorded (none live / all throttled?)."; exit 2; }
 
@@ -132,15 +133,15 @@ fi
 
 # ---------------- stage: transcribe (SenseVoice-Small, CPU) ----------------
 if [ -n "${WANT[transcribe]:-}" ]; then
-  say "STAGE transcribe — SenseVoice-Small (CPU) -> transcript.csv + <seg>.16k.flac"
-  "$PY" fleet/transcribe.py "data/$DATE" --jobs "${ASR_JOBS:-1}" || say "⚠ transcribe had issues"
+  say "STAGE transcribe — SenseVoice-Small (CPU) -> transcript_sensevoice.csv + <seg>.16k.flac"
+  "$PY" fleet/transcribe.py "data/$DOUYIN_SESSION" --jobs "${ASR_JOBS:-1}" || say "⚠ transcribe had issues"
 fi
 
 # ---------------- stage: upload (pack + SDK upload to a test dataset) ----------------
 if [ -n "${WANT[upload]:-}" ]; then
   say "STAGE upload — pack + SDK upload -> $REPO_ID (station=$STATION)"
   STAGING="/tmp/run_staging.$$"; rm -rf "$STAGING"
-  if "$PY" fleet/pack.py --station "$STATION" --date "$DATE" --data-dir data --out-dir "$STAGING" --shard-gb 7; then
+  if "$PY" fleet/pack.py --station "$STATION" --date "$DATE" --session "$DOUYIN_SESSION" --data-dir data --out-dir "$STAGING" --shard-gb 7; then
     if "$PY" fleet/ms_upload.py --repo-id "$REPO_ID" --staging "$STAGING" --station "$STATION" \
          --date "$DATE" ${TOKEN_FROM:+--token-from "$TOKEN_FROM"}; then
       say "✓ upload VERIFIED -> $REPO_ID"
@@ -151,9 +152,9 @@ fi
 
 # ---------------- retention (KEEP by default; --purge deletes after a verified upload) ----------------
 if [ "$PURGE" -eq 1 ]; then
-  rm -rf "data/$DATE"; say "purged data/$DATE (--purge)"
+  rm -rf "data/$DOUYIN_SESSION"; say "purged data/$DOUYIN_SESSION (--purge)"
 else
-  say "kept ${#SESS[@]} session(s) under data/$DATE"
+  say "kept ${#SESS[@]} session(s) under data/$DOUYIN_SESSION"
 fi
 
 echo "================= result ================="
