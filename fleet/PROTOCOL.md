@@ -295,7 +295,68 @@ by hand unless the PI confirms that night is already safely on ModelScope.
 
 ---
 
-## 9. Quick reference
+## 9. Understanding the aligned data (time alignment + edge cases)
+
+The pipeline records **two independent streams that share no clock**, and stitches them together
+at the `check` step:
+- **video** — ffmpeg's internal clock is `out_time` (seconds from the start of *that* recording).
+- **events** (chat / like / social / stats / member) — each row carries a **wall-clock time**
+  (the real-world timestamp when the message arrived).
+
+While recording, the recorder samples ffmpeg's progress ~once/second and appends to a sidecar
+`timing_<room>.csv` that maps **wall-clock ↔ video position** (`wall_epoch, wall_iso,
+segment_file, video_pts_s`). At stop, `align.py tag` uses that sidecar to add three columns to each
+event stream → `<kind>_aligned.csv`:
+- `segment_file` — which video file the event falls in,
+- `video_pts_s` — the seek position (seconds) **inside that file**,
+- `in_gap` — `True` if the video was frozen at that instant; `outside` if no video covered it.
+
+So a chat line is placed onto the video by **interpolating its wall-clock time against the timing
+sidecar** — no shared clock is needed, only this calibration table.
+
+**The rule for using the data:**
+- Use **wall-clock `time`** for any timeline that spans files (the only clock that survives restarts).
+- Use **`(segment_file, video_pts_s)` together** *only* to seek inside one specific video file.
+- **`video_pts_s` resets to 0 at every file boundary** — both the 1-hour segment splits and reconnect
+  restarts. Never treat it as a continuous per-room clock.
+
+**Multiple video files per room is normal** — two different causes:
+
+| cause | files | continuous? |
+|---|---|---|
+| **1-hour segmentation** (`segment_time`) | `…_000.ts`, `…_001.ts`, … (same base name) | yes — seamless |
+| **reconnect** (stream dropped, recorder restarted) | a **new** base name (new timestamp) | no — a gap between |
+
+**What happens on a break** (all recorded faithfully; none break the alignment):
+- **Short drop** — ffmpeg rides it, video freezes, `out_time` stops. Events in that window are kept
+  and tagged `in_gap=True`.
+- **Long drop / off-air** — ffmpeg exits and the watchdog restarts it into a **new file**. The outage
+  shows as a **hole in the timeline** (no rows) plus a jump to a new `segment_file`.
+- The `check` step reports these as `break`s and, in the COMPLETENESS block, as **head** (late start /
+  missed opening), **inner** (mid-session reconnect), or **tail** (early cut) gaps.
+
+### Edge cases to be aware of
+
+- **`video_pts_s` is per-file, not per-room** — it resets at every segment/reconnect boundary. Join
+  streams on wall-clock `time`, never on `video_pts_s`.
+- **`in_gap=True` ≠ usable video** — a file covers that second, but the frame *and audio* are frozen.
+  Filter `in_gap` out when you need tight speech↔audience sync.
+- **`outside` rows** = a real event with **no** covering video (before recording started, during a
+  reconnect, or after it ended). The event is kept; there is simply no footage/transcript for it.
+- **"Fully covered" in the check means a video file *exists* for every audience second — not that
+  every second is freeze-free.** A heavily-frozen-but-connected stream can still read as complete;
+  freeze quality shows up in `flow` and the `break`s list, not in coverage.
+- **Full outages leave no rows at all** — there is no `in_gap` marker for them; detect them as **time
+  gaps** in the `time` column.
+- **Partial rooms** — a room can capture video but **0 chat** (danmaku failed), or chat but no video.
+  These are flagged `partial` in the manifest; include or exclude per your analysis.
+- **A true gap's speech/video is gone** — it was never recorded and cannot be recovered. What
+  survives a gap is the **audience side** (events, plus the periodic `stats` and cumulative `like`
+  counters), which still lets you reconstruct viewership across the hole.
+
+---
+
+## 10. Quick reference
 
 ```bash
 # setup (once)
