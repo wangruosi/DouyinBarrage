@@ -74,8 +74,12 @@ def discover(data_dir, session):
             if suf in SKIP_EXT:
                 continue
             if suf in VIDEO_EXT:
+                if f.stat().st_size == 0:
+                    continue                       # empty reconnect stub — nothing to ship
                 video_files.append(f); video_bytes += f.stat().st_size
             elif suf in AUDIO_EXT:
+                if f.stat().st_size == 0:
+                    continue
                 audio_files.append(f); audio_bytes += f.stat().st_size
             else:  # csv, json, db, wal, shm, logs/* -> text bundle
                 text_files.append(f)
